@@ -1,0 +1,48 @@
+SABI PLAY BUILD LOG
+Current Version: v1
+=====================================
+v1 — FOUNDATION
+=====================================
+Status: CODE WRITTEN, NOT YET RUN (see Known Issues)
+
+Implemented:
+- Next.js (App Router) + TypeScript (strict) project skeleton, mobile-first minimal UI
+- Supabase Auth: signup, login, logout, session refresh via middleware
+- Protected /dashboard (middleware + server-side re-check); login/signup redirect when authed
+- profiles table + auto-creation trigger; wallets/wallet_transactions structure
+- Env config split public/secret with zod validation; .env.example
+- API envelope (ok/fail), AppError, redacting JSON logger
+- Integer-only money helpers; rate centralized and unset
+- Game SDK boundary: GameType, MatchState, rules, manifest schema (definitions only)
+- Docs: architecture.md, database.md, development.md
+
+Architecture:
+- Modular monolith: app / components / lib / server / game-sdk / games / types / database
+
+Database:
+- 0001 profiles, 0002 wallet foundation, 0003 signup trigger. RLS on all tables.
+
+API:
+- GET /api/health, GET /api/me (reference protected route)
+
+Security:
+- Anon key only in browser; service-role client exists but is server-only and unused
+- RLS read-own; no client writes to wallets/ledger; generic user errors
+
+Known Issues:
+- Not installed/built/tested: build environment had no network. Run npm install, typecheck, build.
+- Next/Supabase package versions are caret ranges chosen without registry access; verify.
+- Email confirmation setting in Supabase affects signup flow (handled both ways).
+- No automated tests yet.
+
+Decisions:
+- Wallet tables included now (structure, read-only) to avoid later rewrite; no mutation paths.
+- Wallet balance and ledger amounts are bigint PlayCoins; kobo reserved for payments/deposits.
+- middleware.ts used (Next 15 convention; rename if Next version requires proxy.ts).
+- Database migrations are plain SQL files, applied manually/Supabase CLI.
+
+Not Implemented:
+- Payments, demo deposits, wallet mutations, matches, games, SDK runtime, admin, Colyseus, tests
+
+Next Planned Version:
+- v2 — Wallet core: atomic credit/debit DB functions, PaymentProvider interface + DemoPaymentProvider, demo deposit
