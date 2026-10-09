@@ -1,5 +1,25 @@
 SABI PLAY BUILD LOG
-Current Version: v1.0.2 (verification pending)
+Current Version: v1.0.3 (verification pending)
+=====================================
+v1.0.3 — PATCH: SIGNUP DIAGNOSTICS
+=====================================
+Status: PROPOSED, VERIFICATION PENDING. Do not mark verified until the deployed
+build passes and signup has been tested.
+
+Problem:
+- Deployed signup shows "Could not create the account..." although the user,
+profile and wallet rows are created (confirmed_at null; one user across
+several attempts).
+Analysis:
+- Code path: that message is returned only when supabase.auth.signUp() returns
+an error. A null session (email confirmation on) is handled as a success
+notice, not an error. Cause is therefore on the Supabase side (likely email
+sending / rate limit / unauthorized recipient) but NOT yet established; the
+action logged only error.code.
+Change:
+- src/app/auth/actions.ts: signup failure log now also records error status,
+name and message. User-facing messages and auth logic unchanged.
+Root-cause fix: pending the logged error code/message.
 =====================================
 v1.0.2 — PATCH: TYPE FIX (server.ts)
 =====================================
