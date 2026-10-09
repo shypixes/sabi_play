@@ -1,25 +1,32 @@
 SABI PLAY BUILD LOG
-Current Version: v1.0.1 (verification pending)
+Current Version: v1.0.2 (verification pending)
 =====================================
-v1.0.1 — PATCH: TYPE FIX (PROPOSED)
+v1.0.2 — PATCH: TYPE FIX (server.ts)
 =====================================
-Status: FIX PROPOSED, VERIFICATION PENDING. Not yet applied/built. Do not mark
-complete until typecheck and build pass.
+Status: FIX PROPOSED, VERIFICATION PENDING. Not marked complete until Vercel
+build/typecheck pass.
+
+Problem:
+- After the v1.0.1 fix, Vercel reported the same error in
+src/lib/supabase/server.ts:13 ("Parameter 'list' implicitly has an 'any' type").
+This is the same untyped setAll(list) pattern, previously hidden because
+Next reports only the first type error.
+Change:
+- Annotated setAll's parameter in server.ts with the same CookiesToSet type
+used in middleware.ts. No behavior change; try/catch and cookie logic untouched.
+Files touched: src/lib/supabase/server.ts, BUILD_LOG.txt only.
+
+=====================================
+v1.0.1 — PATCH: TYPE FIX (middleware.ts)
+=====================================
+Status: Reported passing by Vercel compile (middleware error resolved).
 
 Problem:
 - Vercel build failed: "Parameter 'list' implicitly has an 'any' type" at
 src/lib/supabase/middleware.ts:16 (setAll).
-Proposed change:
-- Annotate setAll's parameter in middleware.ts using a type derived from
-@supabase/ssr's CookieMethodsServer["setAll"]. No behavior change.
-Unverified assumptions:
-- CookieMethodsServer is exported by the installed @supabase/ssr version
-(check: grep node_modules/@supabase/ssr/dist/main/*.d.ts).
-- Resulting cookie options type is accepted by NextResponse cookies.set.
-Follow-up to check:
-- src/lib/supabase/server.ts has the same untyped setAll(list); decide whether
-to annotate it in this patch or separately after typecheck reports it.
-
+Change:
+- Annotated setAll's parameter in middleware.ts with an explicit CookiesToSet type.
+No behavior change.
 =====================================
 v1 — FOUNDATION
 =====================================
