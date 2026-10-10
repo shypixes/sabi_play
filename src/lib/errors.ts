@@ -27,3 +27,12 @@ export class AppError extends Error {
     this.status = STATUS[code];
   }
 }
+
+/**
+ * Supabase/PostgREST errors are plain objects, which loggers render as "[object Object]".
+ * Convert one into a real Error so server logs keep the code and message.
+ * Internal only: never return this message to users.
+ */
+export function queryError(operation: string, error: { code?: string; message?: string }): Error {
+  return new Error(`${operation} failed (${error.code ?? "unknown"}): ${error.message ?? "no message"}`);
+}

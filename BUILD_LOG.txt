@@ -1,5 +1,96 @@
 SABI PLAY BUILD LOG
-Current Version: v1.0.3 (verification pending)
+Current Version: v1.1 (platform UI; live Supabase verification pending)
+=====================================
+v1.1 — PLATFORM UI (HOME, GAMES, COMPETITIONS, WALLET, PROFILE)
+=====================================
+Status: IMPLEMENTED; typecheck, production build and mock-backend browser tests
+pass. NOT yet verified against the real Supabase project or the Vercel deployment.
+
+Implemented:
+- App shell for signed-in areas: bottom tab bar on phones, sidebar at >=900px.
+  Nav: Home (/dashboard), Games, Competitions, Wallet, Profile. All routes are real.
+- Home (existing /dashboard improved, not duplicated): greeting from display_name
+  -> @username -> "Player"; real wallet balance; games entry point + empty state;
+  Score Attack / 1v1 format cards marked Coming soon; existing log out kept.
+- Games: catalogue rendered from src/games/registry.ts (validated GameManifests).
+  Registry is EMPTY (no games built), so an empty state is shown. GameCard/GameGrid
+  ready for future games; no launch control until the Game SDK runtime exists.
+- Competitions: two format cards; player counts/durations read from GAME_TYPE_RULES.
+  "No competitions open yet" empty state. No entry, matchmaking or prizes.
+- Wallet: real balance (public.wallets) and latest 50 ledger rows
+  (public.wallet_transactions: type, signed amount, status, date in Africa/Lagos).
+  Empty, loading (Suspense skeletons) and per-section error states. Read-only:
+  no deposit/withdraw controls, no mutation functions. Missing wallet row is shown
+  as "not set up", never as a made-up 0.
+- Profile: display name, username, email + verified status, member since, log out.
+  No editing (deferred).
+- Currency label "PlayCoins" (name already used in money.ts/decisions), centralised
+  in src/lib/config.ts (CURRENCY_NAME). formatPlayCoins(): BigInt digit grouping.
+- Route-level loading.tsx and error.tsx for the app shell; global not-found page.
+- Styling extends the v1 tokens in globals.css (dark theme, #4ade80 accent, system
+  font, 48px touch targets, focus rings, reduced-motion). No new dependencies.
+
+Security / data access:
+- Middleware protects every nav route via one shared list (src/lib/routes.ts);
+  prefix match tightened (/wallet and /wallet/* match, /walletx does not).
+- (app)/layout.tsx and every page re-check getCurrentUser() server-side.
+- getCurrentUser() wrapped in React cache(): one Auth call per render, not one per
+  component.
+- src/server/wallet.ts: user-scoped server client (anon key + session, RLS applies);
+  user id only from getCurrentUser(); selects display columns only (no reference or
+  metadata). No schema, migration, RLS or grant changes. Service-role client unused.
+- Supabase query errors now logged as real Errors with code/message
+  (lib/errors.ts queryError); previously logged as "[object Object]".
+
+Files:
+- New: src/app/(app)/{layout,loading,error}.tsx, (app)/{games,competitions,wallet,
+  profile}/page.tsx, src/app/(auth)/layout.tsx, src/app/not-found.tsx,
+  src/components/{AppNav,BrandMark,SignOutButton,icons,ui}.tsx,
+  src/components/wallet/{BalanceCard,TransactionList}.tsx,
+  src/components/competitions/{formats.ts,FormatCard.tsx},
+  src/components/games/GameCard.tsx, src/games/registry.ts, src/lib/routes.ts,
+  src/server/wallet.ts
+- Moved (URLs unchanged): login, signup -> src/app/(auth)/; dashboard -> src/app/(app)/
+- Modified: app/layout.tsx, app/page.tsx (landing), app/globals.css,
+  lib/config.ts (APP_NAME fallback "Sabi Play"), lib/money.ts, lib/errors.ts,
+  lib/supabase/middleware.ts, server/auth.ts, server/profiles.ts (findOwnProfile,
+  playerName), types/index.ts. Login/signup pages: subtitle only.
+  AuthForm and auth/actions.ts unchanged.
+
+Tests actually run:
+- npm run typecheck (tsc --noEmit): PASS.
+- next build (production): PASS.
+- curl, logged out: /dashboard /games /competitions /wallet /profile /wallet/x
+  -> 307 /login; / /login /signup 200; /api/health 200; /api/me 401 envelope.
+  Forged session cookie -> 307 /login.
+- Headless Chromium against `next start` + a LOCAL MOCK Supabase (Auth + PostgREST,
+  RLS emulated by token): 74/74 checks PASS. Covered: login (good/bad password),
+  signup confirm-email notice, nav to all 5 areas with aria-current, authed /login
+  -> /dashboard, log out from Home and Profile, real balance, 5 own transactions
+  (other user's rows excluded), order, signs, statuses, dates; zero balance; empty
+  history; missing profile/wallet rows; failing wallet queries (section errors);
+  no UUIDs/references in HTML; no console errors; no horizontal overflow at
+  390x844 and 1440x900; desktop sidebar; not-found page.
+- Mock request log: every data request used the signed-in user's token; 0 writes.
+
+Known limitations:
+- Not tested against the real Supabase project or Vercel. Real RLS/grants were not
+  inspected (mock only emulates them). The open v1.0.3 signup issue is unchanged.
+- error.tsx and loading.tsx compile but were not triggered directly in tests
+  (section-level errors/skeletons were).
+- Transaction history shows the latest 50 rows; no pagination.
+- No lockfile; next lint is still not configured (pre-existing).
+
+Awaiting backend:
+- Game SDK runtime + first games (registry entries), competition/match system,
+  wallet mutation functions, payments, profile editing (needs username rules:
+  case-insensitive uniqueness, reserved names).
+
+Recommended next task:
+- Close v1.0.3: find the signup root cause from the logged error, add the
+  email-confirmation callback route and a clear "email not confirmed" login
+  message, then verify v1.1 on the deployed build.
+
 =====================================
 v1.0.3 — PATCH: SIGNUP DIAGNOSTICS
 =====================================

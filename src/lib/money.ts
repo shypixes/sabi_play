@@ -37,6 +37,22 @@ export function formatKobo(k: Kobo): string {
   return `${k < 0 ? "-" : ""}₦${naira}.${rem}`;
 }
 
+/** Groups the digits of a non-negative bigint with commas, e.g. 1234567n -> "1,234,567". */
+function groupDigits(n: bigint): string {
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * Display only. Integer formatting with digit grouping; no floating-point math.
+ * `signed: true` prefixes credits with "+" and debits with "−" (U+2212).
+ */
+export function formatPlayCoins(c: PlayCoins, opts: { signed?: boolean } = {}): string {
+  const value = BigInt(c);
+  const abs = value < 0n ? -value : value;
+  const sign = value < 0n ? "−" : opts.signed && value > 0n ? "+" : "";
+  return `${sign}${groupDigits(abs)}`;
+}
+
 /**
  * Exchange rate: kobo per 1 PlayCoin, as an integer ratio. NOT DECIDED YET.
  * Set once here when product decides; nowhere else.
