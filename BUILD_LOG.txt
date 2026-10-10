@@ -1,5 +1,135 @@
 SABI PLAY BUILD LOG
-Current Version: v1.1 (platform UI; live Supabase verification pending)
+Current Version: v1.2.0 (competition foundation; live Supabase verification pending)
+=====================================
+v1.2.0 — COMPETITION FOUNDATION (CONFIGS, SESSIONS, RESULTS, VALIDATION STATE)
+=====================================
+Status: IMPLEMENTED for PRACTICE; PAID modelled but DISABLED. Typecheck, unit,
+mocked-integration, real-PostgreSQL and production-build checks pass. Migration 0004
+NOT yet applied to the real Supabase project; nothing verified on Supabase/Vercel.
+Versioning: MAJOR.MINOR.PATCH from here on (new capability = minor bump).
+
+Implemented:
+- Competition configurations (data, not code): game, format (SCORE_ATTACK /
+  ONE_V_ONE), mode PRACTICE | PAID, integer PlayCoin entry fee, reward model
+  FIXED | PRIZE_POOL with parameters, enabled flag, timestamps. Any number of
+  tiers per game+format; no tier names or prices in code. Practice = fee 0 and no
+  reward; paid = fee > 0 + a valid reward config. Terms immutable once created.
+- Sessions: config, game, format, mode, status, validation status, settlement
+  status, created/started/deadline/completed/validated/settled timestamps.
+  Status: WAITING (1v1 only) -> READY -> IN_PROGRESS -> COMPLETED (practice) |
+  SUBMITTED -> COMPLETED (paid, after validator); WAITING/READY -> CANCELLED;
+  IN_PROGRESS -> ABANDONED (quit or deadline + 30s grace passed).
+- Participants: exactly 1 (SCORE_ATTACK) or 2 (ONE_V_ONE), no duplicates. Both
+  1v1 players share the session's single config, so they are on the same tier.
+- Results: one immutable result per session. SCORE_ATTACK: integer score
+  0..1e12. ONE_V_ONE: winner slot or draw. Never trusted: practice -> UNVERIFIED;
+  paid -> PENDING until a trusted validator (service_role) records VERIFIED or
+  REJECTED, exactly once.
+- Settlement TRACKING only: NOT_REQUIRED (practice) or PENDING -> COMPLETED,
+  once, only for terminal sessions. src/lib/competitions/settlement.ts PLANS
+  payouts (fixed reward, 1v1 prize pool with integer fee rounding, draw/cancel
+  refunds, deterministic ledger references for idempotency) but executes nothing.
+- Server operations (src/server/competitions.ts) + API routes:
+  GET  /api/competitions/configs?gameId=&format=
+  POST /api/competitions/sessions {configId}
+  GET  /api/competitions/sessions/:id
+  POST /api/competitions/sessions/:id/{join,start,cancel} {}
+  POST /api/competitions/sessions/:id/result {format, score | winnerSlot}
+  Trusted validator: src/server/competition-validation.ts (service role, NO route).
+- Game SDK: manifest `formats` (replaces type/minPlayers/maxPlayers/
+  durationSeconds, which were platform-owned anyway); competition contract
+  (statuses, CompetitionOption, SessionView, resultSubmissionSchema,
+  GamePlatformApi interface with no wallet/settlement methods). Removed unused
+  MATCH_STATES. GameCard shows format badges.
+
+Files:
+- New: database/migrations/0004_competitions.sql, database/tests/supabase-shim.sql,
+  src/game-sdk/competition.ts, src/lib/competitions/{config,lifecycle,settlement}.ts,
+  src/server/{competitions,competition-validation}.ts,
+  src/app/api/competitions/** (7 route files), vitest.config.mts,
+  tests/unit/*, tests/integration/*, tests/db/*, tests/stubs/server-only.ts
+- Modified: src/game-sdk/{types,manifest,index}.ts, src/games/registry.ts
+  (isGameFormatAvailable), src/components/games/GameCard.tsx, src/lib/api.ts
+  (readJsonBody), package.json, docs/{architecture,database,development}.md,
+  src/games/README.md
+- Dependencies (dev only, new): vitest ^5.0.3, pg ^8.23.1, @types/pg ^8.23.1.
+  No runtime dependencies added. Still no lockfile (pre-existing).
+
+Migration 0004 (additive, one transaction):
+- Creates 4 tables, guard triggers, 2 deferred participant-count constraint
+  triggers, RLS policies, grants and functions. Does not alter, drop or reset
+  0001-0003 objects or data. Applied ONLY to local test databases so far.
+- Behaviour note: users with competition history cannot be hard-deleted
+  (on delete restrict), the same rule wallet_transactions already applies.
+
+Security:
+- Identity only from the verified session (requireUser) and auth.uid() in SQL;
+  no route or RPC accepts a user id; strict zod bodies reject extra fields.
+- Players: SELECT only, and only rows of sessions they participate in (RLS).
+  All writes go through SECURITY DEFINER functions (search_path=''), which lock
+  the player's profile row (serialises per-player ops) and the session row.
+  Non-participants get session_not_found (no information leak).
+- Guard triggers enforce transitions, immutable identity/terms/history,
+  immutable participants/results and one-time validation/settlement for EVERY
+  role, including service_role. EXECUTE revoked from PUBLIC/anon/authenticated
+  on all internal functions (Supabase default privileges grant it otherwise).
+- Abuse guards: max 3 open sessions per player (race-safe), deadlines.
+- Mutating routes require application/json (blocks cross-site form posts).
+- Games/SDK cannot import server, Supabase or wallet code (static test).
+- Service-role client used only by the validator module; not in any bundle.
+
+Tests actually run (all PASS):
+- npm run typecheck: PASS (tests included).
+- npm test: 50/50 — unit 32 (config rules, lifecycle, result schema, settlement
+  plans, module boundaries) + MOCKED integration 18 (route handlers with a fake
+  Supabase client: 401s on every route, userId rejected, no user id in any RPC
+  args, invalid scores rejected before DB, error mapping, EXPIRED -> 409, no
+  internal error leaks, no user ids in responses). Mocked tests do NOT prove RLS.
+- npm run test:db: 59/59 against REAL PostgreSQL 17.10 (local, embedded) with
+  migrations 0001-0004 + a Supabase shim (roles, auth.uid(), default grants),
+  switching roles/JWT claims like PostgREST: config constraints (24 invalid
+  cases), tier uniqueness, term immutability, SQL transition table == TS table,
+  practice SA and 1v1 flows, duplicate results/joins, concurrent joins and
+  open-session limit, invalid scores/outcomes, expiry, RLS isolation, anon
+  denied, direct writes denied, internal/validator functions denied to players,
+  paid creation refused, validation once, settlement once/irreversible, guards
+  binding service_role, participant-count invariants, wallets and ledger
+  unchanged, auth trigger + profile/wallet reads/updates still work.
+- Mutation check: 12 deliberately injected bugs (open RLS, direct grants, no
+  player lock, validator callable, no ownership check, settlement guard removed,
+  TS/SQL drift, user id in RPC, auth removed, ...): all caught.
+- next build (production, placeholder public env): PASS; service-role key,
+  admin client and validator absent from client and server bundles.
+
+Disabled / not implemented:
+- PAID entry and payouts: competition_create_session/join raise
+  paid_competitions_disabled. Prerequisite: atomic SECURITY DEFINER wallet
+  functions (debit entry / credit payout / refund, each writing one ledger row
+  with a unique reference in the same transaction), plus fixing the ledger
+  issues from the audit (PENDING default vs balance_after, mutable rows).
+- No trusted validator exists yet (function + DB RPC only); paid results would
+  stay PENDING. SCORE_ATTACK prize pools need pool grouping (planner returns
+  NOT_SUPPORTED). Forfeit policy for abandoned paid sessions undecided.
+- GamePlatformApi is an interface; the browser runtime wrapper ships with the
+  first game. No games, matchmaking, leaderboards or tournaments. No UI changes
+  beyond GameCard badges (Competitions page still shows its empty state).
+
+Known limitations:
+- Not run against hosted Supabase/PostgREST. Assumed (not tested): PostgREST
+  returns RAISE messages as error.message; schema cache picks up new RPCs.
+  Test tables are owned by a superuser; on Supabase the owner is `postgres`.
+- A 1v1 result is reported by whichever participant submits first (untrusted).
+- No background expiry job: stale IN_PROGRESS sessions stay IN_PROGRESS (they
+  stop counting toward the open-session limit after the deadline); un-joined
+  WAITING sessions count until cancelled.
+- Co-participants can read each other's user ids via direct Supabase queries
+  (RLS allows it); the API never returns user ids.
+
+Next milestone (recommended v1.3.0):
+- Apply and verify 0004 on the dev Supabase project, then Game SDK browser
+  runtime + first SCORE_ATTACK practice game using these APIs. Paid play only
+  after the atomic wallet functions above exist and are tested.
+
 =====================================
 v1.1 — PLATFORM UI (HOME, GAMES, COMPETITIONS, WALLET, PROFILE)
 =====================================

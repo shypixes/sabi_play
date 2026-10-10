@@ -1,7 +1,6 @@
 import type { GameManifest } from "@/game-sdk";
-import { Icon } from "@/components/icons";
 import { Badge } from "@/components/ui";
-import { durationLabel, gameTypeLabel } from "@/components/competitions/formats";
+import { gameTypeLabel } from "@/components/competitions/formats";
 
 /**
  * Card for one integrated game, driven entirely by its validated GameManifest.
@@ -10,20 +9,16 @@ import { durationLabel, gameTypeLabel } from "@/components/competitions/formats"
  */
 export function GameCard({ game }: { game: GameManifest }) {
   const initials = game.name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-  const players = game.minPlayers === game.maxPlayers ? `${game.minPlayers}` : `${game.minPlayers}–${game.maxPlayers}`;
+  const tone = game.formats.length === 1 && game.formats[0] === "ONE_V_ONE" ? "duel" : "score";
   return (
     <article className="game-card">
-      <div className={`game-card__art game-card__art--${game.type === "SCORE_ATTACK" ? "score" : "duel"}`} aria-hidden="true">
+      <div className={`game-card__art game-card__art--${tone}`} aria-hidden="true">
         {initials}
       </div>
       <div className="game-card__body">
         <h3>{game.name}</h3>
         <div className="game-card__meta">
-          <Badge>{gameTypeLabel(game.type)}</Badge>
-          <span><Icon name="user" size={14} /> {players}</span>
-          {game.durationSeconds !== null && (
-            <span><Icon name="clock" size={14} /> {durationLabel(game.durationSeconds)}</span>
-          )}
+          {game.formats.map((f) => <Badge key={f}>{gameTypeLabel(f)}</Badge>)}
         </div>
         <p className="game-card__status">Launching opens with the Game SDK.</p>
       </div>

@@ -1,1 +1,1 @@
-Reserved for future games (Phaser + TypeScript). Each game: `manifest.ts` + game code. No games in V1.
+Reserved for future games (Phaser + TypeScript). Each game: `manifest.ts` (validated by `gameManifestSchema`: id, name, version, `formats`, status) + game code. Games may import only from `@/game-sdk`; they report results through the platform API and never touch wallets. No games yet.

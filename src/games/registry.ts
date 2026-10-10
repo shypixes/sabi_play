@@ -1,4 +1,4 @@
-import { gameManifestSchema, type GameManifest } from "@/game-sdk";
+import { gameManifestSchema, type GameManifest, type GameType } from "@/game-sdk";
 
 /**
  * Platform game catalogue. Each integrated game will contribute its `manifest.ts`
@@ -14,4 +14,9 @@ export const GAMES: readonly GameManifest[] = MANIFESTS.map((m) => gameManifestS
 /** Games players can see and (once the SDK runtime exists) launch. */
 export function listAvailableGames(): readonly GameManifest[] {
   return GAMES.filter((g) => g.status === "ACTIVE");
+}
+
+/** True when the game is ACTIVE and declares support for the format. Gates competition sessions. */
+export function isGameFormatAvailable(gameId: string, format: GameType): boolean {
+  return listAvailableGames().some((g) => g.id === gameId && g.formats.includes(format));
 }
