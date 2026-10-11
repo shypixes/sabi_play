@@ -1,0 +1,5 @@
+/* Full-viewport, non-scrolling game container (inside the platform's iframe). */
+.frame { position: fixed; inset: 0; overflow: hidden; background: #0f1115; overscroll-behavior: none; touch-action: none; }
+.root { position: absolute; inset: 0; }
+.error { position: absolute; inset: auto 16px 50% 16px; margin: 0; padding: 14px; text-align: center; color: #f87171;
+  background: #181b22; border: 1px solid #2a2f3a; border-radius: 12px; }

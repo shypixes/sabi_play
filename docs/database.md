@@ -16,6 +16,9 @@ Conventions: snake_case, uuid keys, timestamptz, FKs everywhere, RLS enabled on 
 - **Validator RPC** `competition_record_validation(session_id, outcome, note)`: service_role only; SUBMITTED+PENDING -> COMPLETED+VERIFIED/REJECTED, once.
 - **RLS**: players read configs and only the sessions/participants/results they take part in. No direct client writes on any competition table. Paid session creation raises `paid_competitions_disabled`.
 - **Deleting users**: users with competition history cannot be hard-deleted (FK `on delete restrict`), matching the existing ledger rule. Users without history are unaffected.
+- **Data script (not a migration):** `database/data/game-sdk-v1-practice-configs.sql` inserts enabled PRACTICE
+  SCORE_ATTACK configs for `pop-rush` and `sum-sprint` (idempotent; no schema change). Run it once in the
+  Supabase SQL editor so the games are playable. The Game SDK uses the existing tables and RPCs only.
 - Not yet: settlement/wallet movements, matchmaking, leaderboards, tournaments.
 
 Not yet defined: games table (games live in code: src/games/registry.ts), settlement execution, payments, admin roles.

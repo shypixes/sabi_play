@@ -1,5 +1,123 @@
 SABI PLAY BUILD LOG
-Current Version: v1.2.4 (competition lifecycle testing milestone; live Supabase verification pending)
+Current Version: v1.3.0 (Game SDK v1; hosted Supabase and preview gameplay verification pending)
+=====================================
+v1.3.0 — MINOR: GAME SDK v1 (ISOLATED GAME FRAME, REFERENCE GAME, SECOND INTEGRATION)
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, real-PostgreSQL,
+production-build and local real-browser (MOCKED backend) checks pass. NOT yet
+verified on hosted Supabase, on the Vercel preview, or on a real phone.
+Version note: minor bump (new feature: SDK runtime + playable games). No
+migration, no schema change, no new API route, no competition state rule,
+wallet or dependency change. Existing migrations untouched.
+
+Findings before building (inspected, not assumed):
+- src/game-sdk had definitions only (game types, manifest formats, competition
+  contract); src/games/registry.ts held one manifest (temporary test-game).
+- The competition API already covers the whole Score Attack practice path:
+  create (READY) -> start (READY only; deadline = start + 180 + 30s) -> result
+  (one per session; late -> EXPIRED, ABANDONED) -> cancel. Reused unchanged.
+- Gaps kept as gaps: no automatic expiry, no rate limiter to reuse, no list
+  API, no column for game version / submission id (would need migration 0005).
+
+Implemented:
+- src/game-sdk (public, games import only this): version.ts (SDK 1.0.0,
+  protocol 1, semver helpers), manifest.ts (schema v1 + validator +
+  registerGames: strict keys, platform-owned keys refused, capabilities
+  allow-list audio/fullscreen, SDK range, duplicate ids -> ManifestError),
+  protocol.ts (zod envelopes, 4 KiB cap, SessionContext without user/wallet
+  data, SubmitOutcome completed|pending_verification|rejected|unresolved),
+  client.ts (connectToPlatform, GameSdk: ready/on/timing/submitResult/
+  reportError/exit/dispose, SdkError codes, server-clock timing).
+  README.md rewritten as the contract.
+- src/lib/game-host: GameHostController (session lifecycle, message
+  validation by origin "null" + iframe window + session + sequence, 10
+  violations -> protocol_error, pause/resume re-reads the session, result
+  delivery with retry + reconciliation, unresolved != rejected, exit cancels
+  only unsubmitted open sessions) and platform-api.ts (adapter over the
+  EXISTING routes; keepalive cancel of a READY session on pagehide).
+- Routes/UI: /games/<id>/play (authenticated; GameHost), /game-frame/<id>
+  (sandbox="allow-scripts", frame CSP connect-src 'none', no-referrer,
+  Permissions-Policy, excluded from middleware so no session cookie is
+  touched). Games page: launchable games show "Play practice"; test-game
+  stays "Not playable yet"; the "Game launcher" upcoming item was removed.
+- src/lib/api.ts: readJsonBody now caps JSON bodies at 16 KiB (streamed;
+  Content-Length not trusted). Applies to every existing route; all current
+  bodies are < 1 KiB.
+- Games: pop-rush (reference, Canvas 2D, touch/pointer, combo, gold, bombs,
+  HUD with score + server-clock time left, honest unresolved/rejected states)
+  and sum-sprint (second integration, DOM, keyboard 1-4 too). Both only use
+  @/game-sdk; no backend, DB, auth or core change. test-game kept (temporary).
+- Data script (NOT a migration): database/data/game-sdk-v1-practice-configs.sql
+  adds enabled PRACTICE SCORE_ATTACK configs for pop-rush and sum-sprint
+  (idempotent). Must be run manually in the hosted Supabase SQL editor; it was
+  NOT run against hosted Supabase from here.
+- Docs: docs/architecture.md (isolation layers + known limitations),
+  docs/database.md, docs/development.md, src/games/README.md.
+
+Fixed during local browser testing (found by the E2E, not in unit tests):
+- Phone layout (390x844): Start, Exit and the post-game "Play again" could sit
+  under the fixed bottom nav, and the sticky header covered the top of the
+  stage (Pop Rush HUD). Stage height and scroll offsets now account for both;
+  the action bar keeps buttons on one row and scrolls into view when a round
+  ends. A tap on a covered button had navigated away (session correctly
+  cancelled on unmount).
+- Removed the iframe allow deny-list ("camera 'none'; ...") and the unknown
+  "bluetooth" Permissions-Policy feature: Chrome logged console errors for
+  them on every load. Unlisted features remain denied by default.
+- Removed dynamicParams=false on the frame route (Next 15.5 logged
+  NoFallbackError for unknown ids); unknown/non-launchable ids still 404.
+
+Known limitations: see docs/architecture.md "Known limitations" (postMessage
+"*" target, frame self-navigation, silent popup block, no automatic expiry,
+IN_PROGRESS not cancelled on tab close, no rate limiter, game version and
+submission id not persisted, unknown /games/<id>/play renders not-found with
+HTTP 200). Client scores are never trusted; practice is UNVERIFIED /
+NOT_REQUIRED with no wallet effect. Not production-ready, no paid play, no
+multiplayer.
+
+Tests actually run (all PASS unless stated):
+- npm run typecheck: PASS.
+- Unit + mocked integration: 308/308 (100 new): game-sdk-manifest (16),
+  game-sdk-protocol (9), game-sdk-client (15), game-host-lifecycle (32),
+  game-host-platform-api (4), game-rules (7), api-body-limit (3),
+  integration/game-host-api (9, REAL route handlers + fake Supabase), plus
+  updates to boundaries (games may import only @/game-sdk; SDK imports no
+  platform code) and game-registry.
+- npm run test:db: 87/87 on real local PostgreSQL 17.10 (11 new in
+  tests/db/game-sdk-practice.test.ts: the data script on migrations 0001-0004
+  creates one free 180s practice config per game and is idempotent;
+  READY -> IN_PROGRESS -> COMPLETED with an UNVERIFIED result and no wallet
+  effect; a retried submission is refused and the first result stands; the
+  SDK's MAX_SCORE equals the DB limit; no result before start; another player
+  can neither see nor submit; cancel mid-game -> ABANDONED, no result after;
+  open-session limit counting. Late-result EXPIRED is covered by the existing
+  v1.2.4 suite).
+- next build (production, dummy env): PASS.
+- Local end-to-end, real Chromium (puppeteer-core), production build via
+  next start, 390x844 touch viewport, Supabase replaced by a local MOCKED
+  stand-in (GoTrue/PostgREST-shaped stub; not hosted Supabase):
+  - Pop Rush: full 180s round, 1380 taps, "Result saved: 674", stored 674,
+    COMPLETED / UNVERIFIED / NOT_REQUIRED; hide/show -> "Paused (timer still
+    running)" and resume; Play again -> new session; Exit -> CANCELLED.
+  - Sum Sprint: full round, 334 answers (37 wrong on purpose), frame
+    "Score 6075" = host "Result saved: 6075" = stored 6075, COMPLETED /
+    UNVERIFIED.
+  - Frame probes: origin "null"; cookie, localStorage, parent.document and
+    top navigation -> SecurityError; fetch blocked by CSP; window.open opened
+    nothing. Forged start/submit before Start: session stayed READY, no
+    result. Forged second result after completion: stored score unchanged, 0
+    extra submit calls.
+  - Start, Exit and Play again verified uncovered (elementFromPoint); HUD
+    below the header.
+  - Frame HTTP: CSP/Referrer/nosniff/Permissions-Policy present, no
+    Set-Cookie; unknown and test-game frames 404; logged-out play page -> 307
+    /login.
+- npm run lint: NOT run (next lint is interactive in this setup).
+- NOT run: hosted Supabase, Vercel preview gameplay, real phone (UNVERIFIED).
+  Acceptance criterion "reference game completes a free-practice session on
+  the deployed preview" is UNVERIFIED until the data script is run on hosted
+  Supabase and the game is played there.
+
 =====================================
 v1.2.4 — PATCH: COMPETITION LIFECYCLE TESTING MILESTONE (TEMPORARY TEST PANEL)
 =====================================

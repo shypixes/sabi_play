@@ -28,6 +28,44 @@ describe("module boundaries", () => {
     });
   }
 
+  const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const importsOf = (file: string) =>
+    [...stripComments(readFileSync(file, "utf8")).matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)].map((m) => m[1] ?? "");
+
+  it("game code imports only the public Game SDK and its own folder", () => {
+    for (const dir of readdirSync(join(ROOT, "src/games")).filter((d) => statSync(join(ROOT, "src/games", d)).isDirectory())) {
+      for (const file of files(join(ROOT, "src/games", dir))) {
+        for (const spec of importsOf(file)) {
+          const allowed = spec === "@/game-sdk" || spec.startsWith("./");
+          expect(allowed, `${file} imports ${spec}`).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("the Game SDK is engine- and framework-independent (no React, Next or platform imports)", () => {
+    for (const file of files(join(ROOT, "src/game-sdk"))) {
+      for (const spec of importsOf(file)) {
+        expect(spec === "zod" || spec.startsWith("./"), `${file} imports ${spec}`).toBe(true);
+      }
+    }
+  });
+
+  it("game code is loaded only by the sandboxed game frame, never by platform pages", () => {
+    const users = files(join(ROOT, "src"))
+      .filter((f) => !f.includes(join("src", "games") + "/"))
+      .filter((f) => importsOf(f).some((s) => s === "@/games/loaders" || /^@\/games\/[^/]+\/(?!manifest$)/.test(s)));
+    expect(users.map((f) => f.slice(ROOT.length + 1))).toEqual([join("src", "app", "game-frame", "[gameId]", "GameFrame.tsx")]);
+  });
+
+  it("the game frame never touches auth, Supabase or server code", () => {
+    for (const file of files(join(ROOT, "src/app/game-frame"))) {
+      for (const spec of importsOf(file)) {
+        expect(/@\/server\/|supabase|@\/lib\/(?!game-host)/.test(spec), `${file} imports ${spec}`).toBe(false);
+      }
+    }
+  });
+
   it("the Game SDK platform API exposes no wallet or settlement operations", () => {
     const src = readFileSync(join(ROOT, "src/game-sdk/competition.ts"), "utf8");
     const api = src.slice(src.indexOf("export interface GamePlatformApi"));

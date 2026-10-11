@@ -1,0 +1,37 @@
+/* Game launcher: a responsive stage sized to the visible viewport (minus header and bottom nav). */
+/* 56px = the sticky mobile .app-header (hidden at >= 900px); keeps the game's HUD out from under it. */
+.host { display: grid; gap: 10px; scroll-margin-top: calc(56px + 8px); }
+.stage {
+  position: relative;
+  width: 100%;
+  /* The host scrolls to just below the header while a game runs: stage + action bar fit between the
+     header (56 + 8) and the bottom nav, with room for a 44px bar row, the 10px gap and 14px slack. */
+  height: calc(100dvh - var(--nav-h) - var(--safe-bottom, 0px) - 132px);
+  min-height: 340px;
+  max-height: 820px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #0f1115;
+  border: 1px solid var(--line);
+}
+.frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+.overlay {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 10px; padding: 20px;
+  text-align: center; background: rgba(15, 17, 21, .82); color: var(--fg);
+}
+.overlayBottom { inset: auto 0 0 0; background: linear-gradient(transparent, rgba(15, 17, 21, .95) 30%); padding-top: 48px; }
+.startButton { min-width: 200px; min-height: 56px; font-size: 1.15rem; justify-self: center; }
+.hint { margin: 0; color: var(--muted); font-size: .85rem; }
+/* One row: the status text wraps, the buttons never drop below it (and under the bottom nav). */
+.bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px;
+  scroll-margin-bottom: calc(var(--nav-h) + var(--safe-bottom, 0px) + 12px);
+}
+.status { color: var(--muted); font-size: .9rem; flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.bar .actions { flex: none; flex-wrap: nowrap; }
+.intro { max-width: 560px; }
+@media (min-width: 900px) {
+  .host { scroll-margin-top: 12px; }
+  .stage { height: calc(100dvh - 220px); }
+}

@@ -9,7 +9,6 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Games" };
 
 const UPCOMING = [
-  { icon: "games", title: "Game launcher", text: "Start any integrated game straight from this page." },
   { icon: "bolt", title: "Score Attack modes", text: "Three-minute sessions where your best score counts." },
   { icon: "swords", title: "1v1 modes", text: "Games that pit you directly against another player." },
 ] as const;

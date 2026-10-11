@@ -4,6 +4,7 @@
 1. `npm install`
 2. Create a Supabase project (dev). Enable Email auth.
 3. Run `database/migrations/0001..0004` in order in the Supabase SQL editor (or via Supabase CLI).
+   To make the games playable, then run the data script `database/data/game-sdk-v1-practice-configs.sql`.
 4. `cp .env.example .env.local` and fill in URL + anon key.
 5. `npm run dev` -> http://localhost:3000
 
