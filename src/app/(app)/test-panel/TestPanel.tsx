@@ -3,8 +3,10 @@
 import { useRef, useState } from "react";
 import {
   TEST_PANEL_CONFIG_ID,
+  canStart,
   displayBody,
   extractSessionId,
+  extractSessionStatus,
   runPanelRequest,
   summarize,
   type PanelAction,
@@ -21,8 +23,14 @@ import styles from "./test-panel.module.css";
 const PENDING_LABEL: Record<PanelAction, string> = {
   create: "Creating practice session…",
   refresh: "Loading session…",
+  start: "Starting session…",
   cancel: "Cancelling session…",
   whoami: "Checking sign-in…",
+};
+const REFRESH_AFTER_START = "Session started. Refreshing session details…";
+
+const STEP_NAME: Record<PanelAction, string> = {
+  create: "Create", refresh: "Refresh", start: "Start", cancel: "Cancel", whoami: "Sign-in check",
 };
 
 type Props = {
@@ -31,39 +39,91 @@ type Props = {
   registryReady: boolean;
 };
 
+/** Runs one request; a request that cannot even be built is reported as a failure, never as success. */
+async function safeRun(action: PanelAction, sessionId: string | null): Promise<PanelResult> {
+  try {
+    return await runPanelRequest(action, sessionId);
+  } catch (err) {
+    return {
+      kind: "network-error", action, method: "-", url: "-", requestBody: null, durationMs: 0,
+      finishedAt: new Date().toISOString(), message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function TestPanel({ email, config, registryReady }: Props) {
   const [pending, setPending] = useState<PanelAction | null>(null);
-  const [result, setResult] = useState<PanelResult | null>(null);
+  const [pendingLabel, setPendingLabel] = useState("");
+  // Results of the last tap: one step, or two for Start (start response, then refreshed details).
+  const [results, setResults] = useState<PanelResult[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [created, setCreated] = useState(0);
-  // Blocks a second tap that lands before React re-renders the disabled button.
+  // Blocks a second tap that lands before React re-renders the disabled buttons.
   const inFlight = useRef(false);
 
-  async function run(action: PanelAction) {
-    if (inFlight.current) return;
-    if (action === "cancel" && !window.confirm("Cancel the last session? This changes its status in the database.")) return;
+  /** Track the session id and its last status as reported by the server. */
+  function absorb(r: PanelResult) {
+    const id = extractSessionId(r);
+    if (id) setSessionId(id);
+    const status = extractSessionStatus(r);
+    if (status) setSessionStatus(status);
+    return id;
+  }
+
+  function begin(action: PanelAction): boolean {
+    if (inFlight.current) return false;
     inFlight.current = true;
     setPending(action);
+    setPendingLabel(PENDING_LABEL[action]);
+    return true;
+  }
+  function end() {
+    inFlight.current = false;
+    setPending(null);
+    setPendingLabel("");
+  }
+
+  async function run(action: Exclude<PanelAction, "start">) {
+    if (inFlight.current) return;
+    if (action === "cancel" && !window.confirm("Cancel the last session? This ends it in the database (READY → CANCELLED, IN_PROGRESS → ABANDONED).")) return;
+    if (!begin(action)) return;
     try {
-      const r = await runPanelRequest(action, action === "create" || action === "whoami" ? null : sessionId);
-      setResult(r);
-      const id = extractSessionId(r);
-      if (id) setSessionId(id);
+      const r = await safeRun(action, action === "create" || action === "whoami" ? null : sessionId);
+      setResults([r]);
+      const id = absorb(r);
       if (action === "create" && r.kind === "response" && r.httpOk && id) setCreated((n) => n + 1);
-    } catch (err) {
-      // Only reachable if the request could not be built (e.g. no session yet).
-      setResult({
-        kind: "network-error", action, method: "-", url: "-", requestBody: null, durationMs: 0,
-        finishedAt: new Date().toISOString(), message: err instanceof Error ? err.message : String(err),
-      });
     } finally {
-      inFlight.current = false;
-      setPending(null);
+      end();
     }
   }
 
-  const summary = result ? summarize(result) : null;
+  /** POST .../start for the displayed session; after a confirmed success, GET the session again. */
+  async function startSession() {
+    const id = sessionId;
+    if (inFlight.current || !canStart(id, sessionStatus)) return;
+    if (!begin("start")) return;
+    try {
+      const started = await safeRun("start", id);
+      setResults([started]);
+      absorb(started);
+      if (summarize(started).tone !== "success") return; // no refresh, nothing assumed
+      setPendingLabel(REFRESH_AFTER_START);
+      const refreshed = await safeRun("refresh", extractSessionId(started) ?? id);
+      setResults([started, refreshed]);
+      absorb(refreshed);
+    } finally {
+      end();
+    }
+  }
+
   const busy = pending !== null;
+  const startAllowed = canStart(sessionId, sessionStatus);
+  const startBlockedReason = !sessionId
+    ? "Create a session first."
+    : sessionStatus !== "READY"
+      ? `Start needs status READY; this session is ${sessionStatus ?? "unknown"}. Create a new session to test Start again.`
+      : null;
 
   return (
     <div className="stack-lg">
@@ -125,37 +185,36 @@ export function TestPanel({ email, config, registryReady }: Props) {
         {created > 0 && <p className={styles.small}>Sessions created from this page since it loaded: {created}</p>}
       </section>
 
+      <section className={styles.card} aria-labelledby="tp-session">
+        <h2 id="tp-session" className={styles.h2}>Current session</h2>
+        <p className={styles.kv}><span>Session ID</span><code className={styles.wrap}>{sessionId ?? "none yet"}</code></p>
+        <p className={styles.kv}>
+          <span>Status (last reported)</span>
+          <strong className={sessionStatus === "READY" ? styles.ok : undefined}>{sessionStatus ?? "-"}</strong>
+        </p>
+        <p className={styles.small}>
+          Sends <code>POST /api/competitions/sessions/&lt;session id&gt;/start</code> with <code>{"{}"}</code>, then reloads
+          the session. Starting begins the session timer in the database (READY → IN_PROGRESS).
+        </p>
+        <button type="button" className={styles.btn} disabled={busy || !startAllowed} aria-busy={pending === "start"} onClick={startSession}>
+          {pending === "start" ? "Starting…" : "Start Session"}
+        </button>
+        {startBlockedReason && <p className={styles.small}>{startBlockedReason}</p>}
+      </section>
+
       <section className={styles.card} aria-labelledby="tp-result">
         <h2 id="tp-result" className={styles.h2}>Result</h2>
         <div aria-live="polite" className={styles.live}>
           {pending && (
-            <p className={styles.pending}><span className={styles.spinner} aria-hidden="true" />{PENDING_LABEL[pending]}</p>
+            <p className={styles.pending}><span className={styles.spinner} aria-hidden="true" />{pendingLabel}</p>
           )}
-          {!pending && !result && <p className={styles.small}>No request sent yet.</p>}
-          {!pending && result && summary && (
-            <div className={`${styles.summary} ${styles[summary.tone]}`}>
-              <strong>{summary.title}</strong>
-              <ul>{summary.details.map((d) => <li key={d}>{d}</li>)}</ul>
-            </div>
-          )}
+          {!pending && results.length === 0 && <p className={styles.small}>No request sent yet.</p>}
         </div>
 
-        {result && (
-          <>
-            <p className={styles.kv}>
-              <span>HTTP status</span>
-              <strong>{result.kind === "response" ? result.httpStatus : "none (no response)"}</strong>
-            </p>
-            <p className={styles.kv}><span>Request</span><code className={styles.wrap}>{`${result.method} ${result.url}`}</code></p>
-            <p className={styles.kv}><span>Time</span><strong>{`${result.durationMs} ms · ${new Date(result.finishedAt).toLocaleTimeString()}`}</strong></p>
-            <p className={styles.small}>Complete response body:</p>
-            <pre className={styles.pre}>{displayBody(result)}</pre>
-          </>
-        )}
+        {results.map((r, i) => (
+          <ResultBlock key={`${r.action}-${r.finishedAt}-${i}`} result={r} step={results.length > 1 ? `Step ${i + 1} of ${results.length}: ${STEP_NAME[r.action]}` : null} />
+        ))}
 
-        {sessionId && (
-          <p className={styles.kv}><span>Last session</span><code className={styles.wrap}>{sessionId}</code></p>
-        )}
         <div className={styles.row}>
           <button type="button" className={`secondary ${styles.btn}`} disabled={busy || !sessionId} onClick={() => run("refresh")}>
             Refresh session
@@ -163,12 +222,35 @@ export function TestPanel({ email, config, registryReady }: Props) {
           <button type="button" className={`secondary ${styles.btn}`} disabled={busy || !sessionId} onClick={() => run("cancel")}>
             Cancel session
           </button>
-          <button type="button" className={`secondary ${styles.btn}`} disabled={busy || !result} onClick={() => setResult(null)}>
+          <button type="button" className={`secondary ${styles.btn}`} disabled={busy || results.length === 0} onClick={() => setResults([])}>
             Clear result
           </button>
         </div>
-        <p className={styles.small}>Refresh and Clear never create a session. Cancel changes the last session to CANCELLED.</p>
+        <p className={styles.small}>
+          Refresh, Start and Clear never create a session. Cancel ends the last session (READY → CANCELLED, IN_PROGRESS → ABANDONED).
+        </p>
       </section>
+    </div>
+  );
+}
+
+function ResultBlock({ result, step }: { result: PanelResult; step: string | null }) {
+  const summary = summarize(result);
+  return (
+    <div className={styles.step}>
+      {step && <h3 className={styles.h3}>{step}</h3>}
+      <div className={`${styles.summary} ${styles[summary.tone]}`}>
+        <strong>{summary.title}</strong>
+        <ul>{summary.details.map((d) => <li key={d}>{d}</li>)}</ul>
+      </div>
+      <p className={styles.kv}>
+        <span>HTTP status</span>
+        <strong>{result.kind === "response" ? result.httpStatus : "none (no response)"}</strong>
+      </p>
+      <p className={styles.kv}><span>Request</span><code className={styles.wrap}>{`${result.method} ${result.url}`}</code></p>
+      <p className={styles.kv}><span>Time</span><strong>{`${result.durationMs} ms · ${new Date(result.finishedAt).toLocaleTimeString()}`}</strong></p>
+      <p className={styles.small}>Complete response body:</p>
+      <pre className={styles.pre}>{displayBody(result)}</pre>
     </div>
   );
 }

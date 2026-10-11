@@ -10,7 +10,7 @@
 /** The free PRACTICE config on the hosted test project (test-game, SCORE_ATTACK, 180s). */
 export const TEST_PANEL_CONFIG_ID = "e3955f36-6ca7-47d2-8c1e-9b95da7b57ac";
 
-export type PanelAction = "create" | "refresh" | "cancel" | "whoami";
+export type PanelAction = "create" | "refresh" | "start" | "cancel" | "whoami";
 
 export type PanelRequest = { method: "GET" | "POST"; url: string; body: string | null; init: RequestInit };
 
@@ -41,9 +41,10 @@ export function buildPanelRequest(action: PanelAction, sessionId: string | null 
   if (!sessionId || !UUID.test(sessionId)) throw new Error("A session must be created or loaded first.");
   const path = `/api/competitions/sessions/${encodeURIComponent(sessionId)}`;
   if (action === "refresh") return { method: "GET", url: path, body: null, init: { ...base, method: "GET", headers } };
+  // start and cancel: the existing routes require a JSON content type and exactly {}.
   const body = "{}";
   return {
-    method: "POST", url: `${path}/cancel`, body,
+    method: "POST", url: `${path}/${action === "start" ? "start" : "cancel"}`, body,
     init: { ...base, method: "POST", headers: { ...headers, "content-type": "application/json" }, body },
   };
 }
@@ -108,9 +109,22 @@ export function extractSessionId(result: PanelResult): string | null {
   return typeof id === "string" && UUID.test(id) ? id : null;
 }
 
+/** Session status from a successful response that contains a session, or null. */
+export function extractSessionStatus(result: PanelResult): string | null {
+  if (result.kind !== "response" || !result.httpOk) return null;
+  const status = sessionOf(result)?.status;
+  return typeof status === "string" ? status : null;
+}
+
+/** Start is only offered for a known session whose last reported status is READY (as the DB requires). */
+export function canStart(sessionId: string | null, status: string | null): boolean {
+  return sessionId !== null && UUID.test(sessionId) && status === "READY";
+}
+
 const SUCCESS_TITLE: Record<PanelAction, string> = {
   create: "Practice session created",
   refresh: "Session loaded",
+  start: "Session started",
   cancel: "Session cancelled",
   whoami: "Signed in",
 };
@@ -125,6 +139,9 @@ function failureHints(action: PanelAction, status: number, code: string, message
   }
   if (status === 409 && /open session/i.test(message)) {
     return ["You already have 3 open sessions. Cancel one (Cancel session) or let in-progress ones expire."];
+  }
+  if (status === 409 && action === "start") {
+    return ["Start only works while the session is READY (it may already be started, cancelled or finished). Tap Refresh session to see its current status."];
   }
   if (status === 409) return ["The session is not in a state that allows this action."];
   if (status === 403 && /paid/i.test(message)) return ["This configuration is PAID. Paid play is disabled; use the free practice config."];
@@ -165,6 +182,8 @@ export function summarize(result: PanelResult): PanelSummary {
           `Game: ${String(s.gameId)} · ${String(s.format)} · ${String(s.mode)}`,
         ]
       : [];
+    if (s && typeof s.startedAt === "string") details.push(`Started: ${s.startedAt}`);
+    if (s && typeof s.deadlineAt === "string") details.push(`Deadline: ${s.deadlineAt}`);
     if (result.action === "create" && result.httpStatus !== 201) details.push(`Note: expected HTTP 201, got ${result.httpStatus}.`);
     return { tone: "success", title: `${SUCCESS_TITLE[result.action]} (HTTP ${result.httpStatus})`, details };
   }

@@ -9,6 +9,8 @@
   background: var(--surface); border: 1px solid var(--line); min-width: 0;
 }
 .h2 { margin: 0; font-size: 1.05rem; }
+.h3 { margin: 0; font-size: .95rem; color: var(--muted); }
+.step { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); min-width: 0; }
 .kv { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin: 0; font-size: .92rem; }
 .kv > span { color: var(--muted); }
 .wrap { overflow-wrap: anywhere; word-break: break-word; text-align: right; }

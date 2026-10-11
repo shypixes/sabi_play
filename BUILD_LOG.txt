@@ -1,5 +1,76 @@
 SABI PLAY BUILD LOG
-Current Version: v1.2.2 (temporary Competition Test Panel; live Supabase verification pending)
+Current Version: v1.2.3 (test panel: Start Session; live Supabase verification pending)
+=====================================
+v1.2.3 — PATCH: TEST PANEL "START SESSION" BUTTON (TEMPORARY TOOL)
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, simulated-DOM,
+real-PostgreSQL and production-build checks pass. NOT yet verified against the
+hosted Supabase project or on a real phone.
+Version note: patch bump. Temporary test tooling only; no API, schema,
+migration, wallet or dependency change.
+
+Endpoint used (read from the repository, not assumed):
+- src/app/api/competitions/sessions/[sessionId]/start/route.ts:
+  POST /api/competitions/sessions/<sessionId>/start, JSON content type, body
+  exactly {} (strict schema; extra fields -> 400). Server calls
+  competition_start_session(p_session_id) as the signed-in user; the DB function
+  only starts the caller's own READY session (READY -> IN_PROGRESS, sets
+  started_at and deadline = time limit + 30s) and raises invalid_state otherwise
+  (-> HTTP 409). Success -> HTTP 200 {ok:true, data:{session}}.
+
+Implemented (src/app/(app)/test-panel/ only):
+- "Current session" card: session id, last reported status, Start Session.
+- Start is enabled only when a session exists AND its last reported status is
+  READY (canStart). Otherwise it is disabled with the reason shown.
+- Tap -> POST .../start with {} (same-origin cookie session; no user id/token).
+  After a CONFIRMED success (2xx + ok envelope) the panel GETs the session again
+  automatically. Both responses are shown as steps (HTTP status, request, full
+  JSON). A failed start (409/401/404/network) is shown with hints and does NOT
+  trigger the refresh. The status is tracked from real responses only.
+- The in-flight guard and disabled buttons cover the whole start + refresh
+  sequence, so repeated or simultaneous taps send one start.
+- Start never creates a session. Nothing runs on page load.
+
+Files:
+- Modified: src/app/(app)/test-panel/{TestPanel.tsx,panel-requests.ts,
+  test-panel.module.css}, tests/unit/test-panel-requests.test.ts,
+  tests/unit/test-panel-component.test.ts, BUILD_LOG.txt
+- New: tests/integration/test-panel-start-contract.test.ts
+
+Tests actually run (all PASS):
+- npm run typecheck: PASS.
+- Unit + mocked integration: 125/125 (26 new).
+  - Request unit tests: exact start request, canStart for every status in
+    migration 0004, success summary (status/start/deadline), 409 invalid state,
+    404 and network failures yield no status.
+  - Simulated DOM (jsdom, fake fetch): disabled with no session; enabled for
+    READY; success shows the start response then auto-refresh (exactly 1 create,
+    1 start, 1 GET); repeated and simultaneous taps send one start; failed start
+    (409, 401, network) shows errors and does not refresh; refresh failure after
+    a successful start is shown; disabled for WAITING, IN_PROGRESS, SUBMITTED,
+    COMPLETED, CANCELLED and ABANDONED.
+  - Contract test: the panel's exact start/refresh requests go through the REAL
+    route handlers (fake Supabase). 200 and only competition_start_session
+    {p_session_id}; invalid_state -> 409 with hint; 401 before any RPC; 404;
+    the route rejects extra fields or a missing JSON content type.
+- Mutation check: 10 injected bugs. Caught: no refresh after start, refresh
+  after a failed start, button ignoring READY, button not disabled while
+  starting, canStart accepting any status, wrong endpoint, extra body field,
+  status not tracked, and all in-flight checks removed. Not caught: removing the
+  handler's own READY check (unreachable through the UI because the button is
+  already disabled; kept as a second guard).
+- npm run test:db: 64/64 on real local PostgreSQL 17.10 (unchanged; includes
+  the READY -> IN_PROGRESS start rehearsal).
+- next build (production, placeholder public env): PASS.
+
+To use: create a practice session, then tap Start Session (expect HTTP 200,
+status IN_PROGRESS, then the refreshed details). A started session counts as
+open until it ends; Cancel on an IN_PROGRESS session marks it ABANDONED (per
+competition_cancel_session), READY/WAITING sessions become CANCELLED.
+
+REMOVE BEFORE LAUNCH: unchanged (delete src/app/(app)/test-panel/ and the
+test-panel tests).
+
 =====================================
 v1.2.2 — PATCH: TEMPORARY COMPETITION TEST PANEL (/test-panel)
 =====================================

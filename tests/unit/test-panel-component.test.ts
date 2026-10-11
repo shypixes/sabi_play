@@ -159,3 +159,152 @@ describe("test panel interactions", () => {
     expect(text()).toContain("Request failed (HTTP 401 UNAUTHENTICATED)");
   });
 });
+
+describe("Start Session", () => {
+  const sessionJson = (status: string, extra: Record<string, unknown> = {}) => json(200, {
+    ok: true,
+    data: { session: { sessionId: SESSION, gameId: "test-game", format: "SCORE_ATTACK", mode: "PRACTICE", status, validationStatus: "NOT_SUBMITTED", settlementStatus: "NOT_REQUIRED", ...extra } },
+  });
+  const startedJson = () => sessionJson("IN_PROGRESS", { startedAt: "2026-10-11T12:00:00Z", deadlineAt: "2026-10-11T12:03:30Z" });
+  const calls = (method: string, url: string) =>
+    fetchMock.mock.calls.filter(([u, i]) => u === url && (i?.method ?? "GET") === method).length;
+  const CREATE = "/api/competitions/sessions";
+  const START = `/api/competitions/sessions/${SESSION}/start`;
+  const DETAILS = `/api/competitions/sessions/${SESSION}`;
+
+  async function createReady() {
+    fetchMock.mockResolvedValueOnce(created("READY"));
+    await tap("Create Practice Session");
+  }
+
+  it("is disabled until a session exists", () => {
+    expect(button("Start Session").disabled).toBe(true);
+    expect(text()).toContain("Create a session first.");
+  });
+
+  it("is enabled for a READY session and sends the exact start request", async () => {
+    await createReady();
+    expect(button("Start Session").disabled).toBe(false);
+    fetchMock.mockResolvedValueOnce(startedJson()).mockResolvedValueOnce(startedJson());
+    await tap("Start Session");
+    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    expect(url).toBe(START);
+    expect(init).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store", body: "{}" });
+    expect(init?.headers).toMatchObject({ "content-type": "application/json" });
+  });
+
+  it("successful start: shows the start response, then refreshes the session details automatically", async () => {
+    await createReady();
+    const startD = deferred();
+    const refreshD = deferred();
+    fetchMock.mockReturnValueOnce(startD.promise).mockReturnValueOnce(refreshD.promise);
+
+    await tap("Start Session");
+    expect(button("Starting…").disabled).toBe(true);
+    expect(button("Create Practice Session").disabled).toBe(true);
+    expect(text()).toContain("Starting session…");
+
+    await act(async () => { startD.resolve(startedJson()); });
+    // Refresh is requested only after the start succeeded; still busy meanwhile.
+    expect(calls("GET", DETAILS)).toBe(1);
+    expect(text()).toContain("Session started. Refreshing session details…");
+    expect(button("Starting…").disabled).toBe(true);
+
+    await act(async () => { refreshD.resolve(startedJson()); });
+    expect(text()).toContain("Step 1 of 2: Start");
+    expect(text()).toContain("Session started (HTTP 200)");
+    expect(text()).toContain("Step 2 of 2: Refresh");
+    expect(text()).toContain("Session loaded (HTTP 200)");
+    expect(text()).toContain("Deadline: 2026-10-11T12:03:30Z");
+    expect(text()).toContain('"status": "IN_PROGRESS"');
+    expect(text()).toContain("Status (last reported)IN_PROGRESS");
+    // Now not READY: Start is disabled and explains why.
+    expect(button("Start Session").disabled).toBe(true);
+    expect(text()).toContain("Start needs status READY; this session is IN_PROGRESS");
+    // Exactly one create, one start, one refresh. No session was created by Start.
+    expect(calls("POST", CREATE)).toBe(1);
+    expect(calls("POST", START)).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores repeated and simultaneous taps while the start is running", async () => {
+    await createReady();
+    const startD = deferred();
+    fetchMock.mockReturnValueOnce(startD.promise).mockResolvedValueOnce(startedJson());
+    await act(async () => {
+      button("Start Session").click();
+      button("Start Session").click();
+    });
+    await act(async () => { button("Starting…").click(); });
+    expect(calls("POST", START)).toBe(1);
+    await act(async () => { startD.resolve(startedJson()); });
+    expect(calls("POST", START)).toBe(1);
+    expect(calls("GET", DETAILS)).toBe(1);
+  });
+
+  it("failed start (409): shows status, server message, hint and body; does not refresh or create", async () => {
+    await createReady();
+    fetchMock.mockResolvedValueOnce(json(409, { ok: false, error: { code: "CONFLICT", message: "That action is not allowed in the session's current state." } }));
+    await tap("Start Session");
+    expect(text()).toContain("Request failed (HTTP 409 CONFLICT)");
+    expect(text()).toContain("That action is not allowed in the session's current state.");
+    expect(text()).toContain("Start only works while the session is READY");
+    expect(text()).toContain("HTTP status409");
+    expect(text()).toContain('"code": "CONFLICT"');
+    expect(text()).not.toContain("Step 2 of 2");
+    expect(calls("GET", DETAILS)).toBe(0);
+    expect(calls("POST", CREATE)).toBe(1);
+    expect(button("Start Session").disabled).toBe(false); // last reported status is still READY; Refresh shows the truth
+  });
+
+  it("failed start (network error or 401) is never shown as started and triggers no refresh", async () => {
+    await createReady();
+    fetchMock.mockRejectedValueOnce(new TypeError("Load failed"));
+    await tap("Start Session");
+    expect(text()).toContain("Request did not reach the server");
+    fetchMock.mockResolvedValueOnce(json(401, { ok: false, error: { code: "UNAUTHENTICATED", message: "You need to log in." } }));
+    await tap("Start Session");
+    expect(text()).toContain("Request failed (HTTP 401 UNAUTHENTICATED)");
+    expect(text()).not.toContain("Session started");
+    expect(calls("GET", DETAILS)).toBe(0);
+  });
+
+  it("start succeeded but the refresh failed: both responses are shown, status comes from the start response", async () => {
+    await createReady();
+    fetchMock.mockResolvedValueOnce(startedJson())
+      .mockResolvedValueOnce(json(500, { ok: false, error: { code: "INTERNAL_ERROR", message: "Something went wrong." } }));
+    await tap("Start Session");
+    expect(text()).toContain("Session started (HTTP 200)");
+    expect(text()).toContain("Step 2 of 2: Refresh");
+    expect(text()).toContain("Request failed (HTTP 500 INTERNAL_ERROR)");
+    expect(text()).toContain("Status (last reported)IN_PROGRESS");
+    expect(button("Start Session").disabled).toBe(true);
+  });
+
+  // Every non-READY status allowed by migration 0004.
+  it.each(["WAITING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "CANCELLED", "ABANDONED"])("is disabled when the session is %s", async (status) => {
+    await createReady();
+    fetchMock.mockResolvedValueOnce(sessionJson(status));
+    await tap("Refresh session");
+    expect(button("Start Session").disabled).toBe(true);
+    expect(text()).toContain(`this session is ${status}`);
+    await act(async () => { button("Start Session").click(); }); // disabled: no request
+    expect(calls("POST", START)).toBe(0);
+  });
+
+  it("is disabled after a create that does not report READY", async () => {
+    fetchMock.mockResolvedValueOnce(created("WAITING"));
+    await tap("Create Practice Session");
+    expect(button("Start Session").disabled).toBe(true);
+  });
+
+  it("becomes enabled again only when a session is reported READY (e.g. a newly created one)", async () => {
+    await createReady();
+    fetchMock.mockResolvedValueOnce(json(200, { ok: true, data: { session: { sessionId: SESSION, status: "CANCELLED" } } }));
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    await tap("Cancel session");
+    expect(button("Start Session").disabled).toBe(true);
+    await createReady();
+    expect(button("Start Session").disabled).toBe(false);
+  });
+});

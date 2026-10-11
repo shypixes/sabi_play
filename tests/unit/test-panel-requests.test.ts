@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   TEST_PANEL_CONFIG_ID,
   buildPanelRequest,
+  canStart,
   displayBody,
   extractSessionId,
+  extractSessionStatus,
   runPanelRequest,
   summarize,
   type PanelResult,
@@ -140,3 +142,56 @@ describe("refresh and cancel", () => {
     expect(summarize(r).details).toContain("Status: CANCELLED");
   });
 });
+
+describe("start", () => {
+  it("posts {} as JSON to the session's start route, same-origin, with no identity", () => {
+    const r = buildPanelRequest("start", SESSION);
+    expect(r).toMatchObject({ method: "POST", url: `/api/competitions/sessions/${SESSION}/start`, body: "{}" });
+    expect(r.init).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store", body: "{}" });
+    expect(r.init.headers).toMatchObject({ "content-type": "application/json" });
+    expect(JSON.stringify(r).toLowerCase()).not.toMatch(/user_?id|authorization|bearer|token/);
+  });
+
+  it("refuses to build a start request without a valid session id", () => {
+    expect(() => buildPanelRequest("start", null)).toThrow();
+    expect(() => buildPanelRequest("start", "not-a-uuid")).toThrow();
+  });
+
+  it("canStart only for a valid session id whose last status is READY", () => {
+    expect(canStart(SESSION, "READY")).toBe(true);
+    expect(canStart(null, "READY")).toBe(false);
+    expect(canStart("not-a-uuid", "READY")).toBe(false);
+    for (const status of [null, "WAITING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "CANCELLED", "ABANDONED", "ready"]) {
+      expect(canStart(SESSION, status)).toBe(false);
+    }
+  });
+
+  it("successful start: status, start time and deadline are read from the real response", async () => {
+    const f = fakeFetch(200, sessionBody({ status: "IN_PROGRESS", startedAt: "2026-10-11T12:00:00Z", deadlineAt: "2026-10-11T12:03:30Z" }));
+    const r = await runPanelRequest("start", SESSION, f);
+    expect(f.mock.calls[0]?.[0]).toBe(`/api/competitions/sessions/${SESSION}/start`);
+    expect(extractSessionStatus(r)).toBe("IN_PROGRESS");
+    const s = summarize(r);
+    expect(s).toMatchObject({ tone: "success", title: "Session started (HTTP 200)" });
+    expect(s.details).toEqual(expect.arrayContaining(["Status: IN_PROGRESS", "Started: 2026-10-11T12:00:00Z", "Deadline: 2026-10-11T12:03:30Z"]));
+  });
+
+  it("failed start (409 invalid state) gets a start-specific explanation and no status", async () => {
+    const r = await runPanelRequest("start", SESSION, fakeFetch(409, envelopeError("CONFLICT", "That action is not allowed in the session's current state.")));
+    const s = summarize(r);
+    expect(s.tone).toBe("error");
+    expect(s.title).toBe("Request failed (HTTP 409 CONFLICT)");
+    expect(s.details.join(" ")).toMatch(/Start only works while the session is READY/);
+    expect(extractSessionStatus(r)).toBeNull();
+    expect(extractSessionId(r)).toBeNull();
+  });
+
+  it("failed start (404, network) never yields a status", async () => {
+    const nf = await runPanelRequest("start", SESSION, fakeFetch(404, envelopeError("NOT_FOUND", "Session not found.")));
+    expect(summarize(nf).tone).toBe("error");
+    expect(extractSessionStatus(nf)).toBeNull();
+    const net = await runPanelRequest("start", SESSION, vi.fn<typeof fetch>(async () => { throw new TypeError("Load failed"); }));
+    expect(extractSessionStatus(net)).toBeNull();
+  });
+});
+
