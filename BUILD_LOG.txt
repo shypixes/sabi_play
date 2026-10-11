@@ -1,5 +1,117 @@
 SABI PLAY BUILD LOG
-Current Version: v1.2.3 (test panel: Start Session; live Supabase verification pending)
+Current Version: v1.2.4 (competition lifecycle testing milestone; live Supabase verification pending)
+=====================================
+v1.2.4 — PATCH: COMPETITION LIFECYCLE TESTING MILESTONE (TEMPORARY TEST PANEL)
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, simulated-DOM,
+real-PostgreSQL, mutation and production-build checks pass. NOT yet verified
+against the hosted Supabase project or on a real phone.
+Version note: patch bump. Temporary test tooling and tests only. No API route,
+competition server code, schema, migration, wallet or dependency change.
+
+Lifecycle as implemented (read from migration 0004, src/server/competitions.ts
+and the routes; nothing invented):
+- Transitions (competition_sessions_guard): WAITING -> READY | CANCELLED;
+  READY -> IN_PROGRESS | CANCELLED; IN_PROGRESS -> SUBMITTED (paid) |
+  COMPLETED (practice) | ABANDONED; SUBMITTED -> COMPLETED.
+- SCORE_ATTACK sessions are created READY; practice settlement = NOT_REQUIRED.
+- Start: READY only; deadline = now + time limit + 30s grace (210s here).
+- Result: POST /api/competitions/sessions/<id>/result with exactly
+  {"format":"SCORE_ATTACK","score":<integer 0..1e12>} (strict; else 400).
+  competition_submit_result(p_session_id, p_score) as the signed-in user.
+  Practice: one result row stored, session COMPLETED / UNVERIFIED /
+  NOT_REQUIRED, completed_at set, never validated or settled. Not IN_PROGRESS
+  (before start, duplicate, finished) -> invalid_state -> 409. Past the
+  deadline -> EXPIRED: session ABANDONED, no result stored, API 409 "The time
+  limit for this session has passed."
+- Cancel: WAITING/READY -> CANCELLED, IN_PROGRESS -> ABANDONED, else 409.
+  Nothing is ever deleted.
+- Another user's session: invisible under RLS; every operation -> 404.
+- Open limit (3): WAITING, READY, or IN_PROGRESS with deadline still ahead.
+
+Implemented (src/app/(app)/test-panel/ only):
+- Submit Result: integer score input (validated with the API's own schema),
+  confirmation dialog, exact request body, in-flight guard against duplicate
+  taps. "Accepted by the API" (2xx + ok envelope) is reported separately from
+  completion: after acceptance the panel reloads the session and runs a
+  completion check (COMPLETED, completed_at, stored score = submitted score,
+  UNVERIFIED, NOT_REQUIRED). It never claims validation.
+- Rejected-operation tests (8): start when not READY, submit before start,
+  submit again / to a finished session, submit after the deadline, cancel a
+  finished session, out-of-range score, read and cancel an unknown session.
+  Each reloads the session first and only sends when the fresh state predicts
+  a refusal (so a test cannot move a session forward), then reloads again and
+  compares: PASS / FAIL / INCONCLUSIVE, naming any changed fields. No test
+  creates a session. Unknown-session tests use a fixed id that cannot exist;
+  the API answers other users' sessions identically, so no second account and
+  no foreign data are needed.
+- Your sessions (cleanup): server-side, RLS-scoped read of the caller's own
+  50 most recent sessions (created_by = verified user id), open count vs 3,
+  deadline state and the real cancel outcome (CANCELLED or ABANDONED) per row.
+  Cancel needs confirmation naming the outcome, then reloads the session and
+  the list. Use loads a session. Nothing is created or cancelled on load.
+- Files split for removal in one step: panel-lifecycle.ts (pure rules),
+  load-sessions.ts (server-only list read), MySessions.tsx,
+  RejectionTests.tsx, ResultBlock.tsx.
+
+Missing backend functionality (documented, NOT built):
+1. No automatic expiry. Expiry is lazy: only competition_submit_result
+   enforces the deadline (-> ABANDONED). An expired IN_PROGRESS session keeps
+   that status until submitted/cancelled; it just stops counting toward the
+   limit. Next step: a service-role competition_expire_sessions() run by a
+   scheduler (pg_cron or Vercel Cron), or expiry on read. No scheduler added.
+2. No API lists a user's sessions; the panel uses its own RLS-scoped server
+   read instead.
+3. Practice results stay UNVERIFIED by design. There is no validator and no
+   settlement/wallet functions (paid mode remains disabled).
+4. A late submission returns 409 but still changes state (ABANDONED); this is
+   intended behaviour, shown as such in the panel.
+
+Tests actually run (all PASS unless stated):
+- npm run typecheck: PASS.
+- Unit + mocked integration: 208/208 (83 new). Flake found and fixed: a test
+  fixture stamped times per call, which the panel (correctly) saw as a change;
+  15 consecutive full runs then passed.
+  - tests/unit/test-panel-lifecycle.test.ts (new): DB-rule mirrors, score
+    parsing, every rejection test's availability, verdicts, completion check,
+    and a property check that an offered rejection test is never one the
+    backend would accept.
+  - Simulated DOM: Submit (disabled rules, confirmation, exact body, reload and
+    completion PASS/FAIL, 409 handling, deadline), rejection tests (pre-check,
+    not sent when no longer refused, unknown id, late submission), sessions
+    list and cleanup (confirmation, outcome, reload).
+  - Contract (renamed test-panel-api-contract.test.ts): the panel's exact
+    create/refresh/start/submit/cancel/sign-in requests through the REAL route
+    handlers with mocked auth and fake Supabase: exact RPC arguments, 200/409/
+    400/404 mapping, extra body fields refused, another user's session -> 404
+    with nothing about it returned, unauthenticated -> 401 with no DB access.
+  - Page: two reads only (config, own sessions scoped to the signed-in user),
+    no request on load.
+- npm run test:db: 76/76 on real local PostgreSQL 17.10 (12 new in
+  tests/db/test-panel-lifecycle.test.ts): full practice path with exactly one
+  stored result and no settlement; players cannot verify/settle/edit results;
+  rejected operations leave the session byte-identical; DB score range;
+  cancel in WAITING/READY/IN_PROGRESS matches the panel's prediction;
+  concurrent submits/cancels -> exactly one succeeds; deadline +5s accepted,
+  -1s EXPIRED/ABANDONED with nothing stored; expired session stays IN_PROGRESS,
+  is not counted (panel count == DB count) and cancels to ABANDONED; user B
+  cannot see, list, start, cancel or submit on A's session; anon denied, no
+  user id -> not_authenticated; wallets (500 PlayCoins each) and the ledger
+  unchanged across every operation.
+- Mutation check (not committed): first round 17 injected bugs, 15 caught; the
+  2 survivors (2xx without ok envelope treated as success; result presence not
+  compared) got new tests and are now caught. One more added after a refactor.
+  Final: 18/18 caught (cancel-outcome and open-limit bugs are also caught by
+  the real-PostgreSQL suite).
+- next build (production, no env file present): PASS. Client bundles contain
+  no service-role references or server-only code.
+- NOT run: hosted Supabase, Vercel preview behaviour, real phone (UNVERIFIED).
+
+REMOVE BEFORE LAUNCH: delete src/app/(app)/test-panel/ and the test-panel tests
+(tests/unit/test-panel-*.test.ts, tests/integration/test-panel-*.test.ts,
+tests/db/test-panel-lifecycle.test.ts). The limit op added to
+tests/integration/fake-supabase.ts is harmless to keep.
+
 =====================================
 v1.2.3 — PATCH: TEST PANEL "START SESSION" BUTTON (TEMPORARY TOOL)
 =====================================

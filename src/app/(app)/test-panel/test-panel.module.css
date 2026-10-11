@@ -19,8 +19,18 @@
 .warn { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); color: var(--warn); background: rgba(251, 191, 36, .08); font-size: .92rem; }
 .small { margin: 0; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
 .btn { width: 100%; }
-.row { display: grid; gap: 8px; grid-template-columns: 1fr; }
-@media (min-width: 560px) { .row { grid-template-columns: repeat(3, 1fr); } }
+.row2 { display: grid; gap: 8px; grid-template-columns: 1fr; }
+@media (min-width: 560px) { .row2 { grid-template-columns: repeat(2, 1fr); } }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.item { display: grid; gap: 6px; padding: 12px; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--surface-2); min-width: 0; }
+.current { border-color: var(--accent); }
+.field { display: grid; gap: 6px; font-size: .92rem; }
+.field > span { color: var(--muted); }
+.field input {
+  min-height: 48px; padding: 10px 12px; border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--bg); color: var(--fg); font-size: 16px; /* 16px stops iOS zooming on focus */
+}
+.field input[aria-invalid="true"] { border-color: var(--err); }
 .live { min-height: 24px; }
 .pending { display: flex; align-items: center; gap: 10px; margin: 0; font-weight: 600; }
 .spinner {

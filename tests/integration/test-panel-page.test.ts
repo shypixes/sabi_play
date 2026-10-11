@@ -10,9 +10,15 @@ import { createFakeClient, createFakeState, type FakeState } from "./fake-supaba
 const state: { fake: FakeState } = { fake: createFakeState() };
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => createFakeClient(state.fake) }));
 vi.mock("@/lib/logger", () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+// Only useRouter is replaced (it needs the App Router at runtime); notFound/redirect stay real.
+vi.mock("next/navigation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/navigation")>()),
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 
 const { default: TestPanelPage } = await import("@/app/(app)/test-panel/page");
 const { isTestPanelEnabled } = await import("@/app/(app)/test-panel/load-config");
+const { loadMySessions, MY_SESSIONS_LIMIT } = await import("@/app/(app)/test-panel/load-sessions");
 
 const CONFIG_ID = "e3955f36-6ca7-47d2-8c1e-9b95da7b57ac";
 const configRow = (o: Record<string, unknown> = {}) => ({
@@ -75,9 +81,9 @@ describe("rendering for a signed-in user", () => {
     ]) expect(html, text).toContain(text);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(state.fake.rpcCalls).toEqual([]);
-    // Only one read: the config row, by id.
-    expect(state.fake.queries.map((q) => q.table)).toEqual(["competition_configs"]);
-    expect(state.fake.queries[0]?.ops).toContainEqual(["eq", ["id", CONFIG_ID]]);
+    // Two reads only: the config row by id, and the caller's own sessions. No writes.
+    expect(state.fake.queries.map((q) => q.table).sort()).toEqual(["competition_configs", "competition_sessions"]);
+    expect(state.fake.queries.find((q) => q.table === "competition_configs")?.ops).toContainEqual(["eq", ["id", CONFIG_ID]]);
   });
 
   it("result actions start disabled (nothing to refresh, cancel or clear yet)", async () => {
@@ -113,3 +119,68 @@ describe("rendering for a signed-in user", () => {
     expect(html).not.toMatch(/service[_-]?role|access_token|refresh_token/i);
   });
 });
+
+describe("your sessions (server-side, RLS-scoped read)", () => {
+  const ME = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const NOW = Date.parse("2026-10-11T12:00:00Z");
+  const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
+    id, config_id: CONFIG_ID, game_id: "test-game", format: "SCORE_ATTACK", mode: "PRACTICE", status,
+    validation_status: "NOT_SUBMITTED", settlement_status: "NOT_REQUIRED", created_at: "2026-10-11T11:00:00Z",
+    started_at: null, deadline_at: null, completed_at: null, ...o,
+  });
+  const rows = [
+    row("11111111-1111-4111-8111-111111111111", "READY"),
+    row("22222222-2222-4222-8222-222222222222", "IN_PROGRESS", { started_at: "2026-10-11T11:58:00Z", deadline_at: "2026-10-11T12:01:30Z" }),
+    row("33333333-3333-4333-8333-333333333333", "IN_PROGRESS", { started_at: "2026-10-11T11:00:00Z", deadline_at: "2026-10-11T11:03:30Z" }),
+    row("44444444-4444-4444-8444-444444444444", "COMPLETED", { validation_status: "UNVERIFIED", completed_at: "2026-10-11T11:02:00Z" }),
+    row("55555555-5555-4555-8555-555555555555", "CANCELLED", { completed_at: "2026-10-11T11:02:00Z" }),
+  ];
+
+  it("reads only the caller's own sessions (created_by = caller, newest first, limited)", async () => {
+    state.fake.tables.competition_sessions = { data: rows, error: null };
+    await loadMySessions(ME, NOW);
+    const q = state.fake.queries.find((x) => x.table === "competition_sessions");
+    expect(q?.ops).toContainEqual(["eq", ["created_by", ME]]);
+    expect(q?.ops).toContainEqual(["order", ["created_at", { ascending: false }]]);
+    expect(q?.ops).toContainEqual(["limit", [MY_SESSIONS_LIMIT]]);
+    expect(state.fake.rpcCalls).toEqual([]);
+  });
+
+  it("computes limit counting and cancel outcomes exactly like the database functions", async () => {
+    state.fake.tables.competition_sessions = { data: rows, error: null };
+    const r = await loadMySessions(ME, NOW);
+    if (r.state !== "ok") throw new Error("expected ok");
+    expect(r.rows.map((x) => [x.status, x.countsTowardLimit, x.deadlinePassed, x.cancelOutcome])).toEqual([
+      ["READY", true, false, "CANCELLED"],
+      ["IN_PROGRESS", true, false, "ABANDONED"],
+      ["IN_PROGRESS", false, true, "ABANDONED"], // past deadline: still IN_PROGRESS, no longer counted
+      ["COMPLETED", false, false, null],
+      ["CANCELLED", false, false, null],
+    ]);
+    expect(r.openCount).toBe(2);
+    expect(r.maxOpen).toBe(3);
+  });
+
+  it("skips malformed rows and reports a load error without exposing it", async () => {
+    state.fake.tables.competition_sessions = { data: [rows[0], { id: "nope" }], error: null };
+    const r = await loadMySessions(ME, NOW);
+    expect(r.state === "ok" && r.rows.length).toBe(1);
+    state.fake.tables.competition_sessions = { data: null, error: { code: "42501", message: "permission denied" } };
+    expect(await loadMySessions(ME, NOW)).toEqual({ state: "error" });
+  });
+
+  it("the page renders the list and still sends no request on load", async () => {
+    state.fake.tables.competition_configs = { data: configRow(), error: null };
+    state.fake.tables.competition_sessions = { data: rows, error: null };
+    const html = await renderPage();
+    expect(html).toContain("Your sessions");
+    expect(html).toContain("22222222-2222-4222-8222-222222222222");
+    expect(html).toContain("Rejected-operation tests");
+    expect(html).toContain("Submit Result");
+    // Scoped to the signed-in user from the verified session, never to a client-supplied id.
+    expect(state.fake.queries.find((q) => q.table === "competition_sessions")?.ops).toContainEqual(["eq", ["created_by", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(state.fake.rpcCalls).toEqual([]);
+  });
+});
+

@@ -38,6 +38,7 @@ export function createFakeClient(state: FakeState) {
         select: (...a: unknown[]) => (record.ops.push(["select", a]), builder),
         eq: (...a: unknown[]) => (record.ops.push(["eq", a]), builder),
         order: (...a: unknown[]) => (record.ops.push(["order", a]), builder),
+        limit: (...a: unknown[]) => (record.ops.push(["limit", a]), builder),
         maybeSingle: () => (record.ops.push(["maybeSingle", []]), builder),
         then<T>(resolve: (r: Response) => T, reject?: (e: unknown) => T) {
           return Promise.resolve(state.tables[table] ?? { data: null, error: null }).then(resolve, reject);

@@ -5,14 +5,32 @@
  * Every request goes to the EXISTING API with the browser's own session cookie
  * (same-origin). Nothing here sends a user id, token or service key, and nothing
  * assumes success: results are built only from the real HTTP response.
+ *
+ * Routes and bodies used (read from src/app/api/competitions/**):
+ *   create   POST /api/competitions/sessions                     {"configId": "<uuid>"}
+ *   refresh  GET  /api/competitions/sessions/<id>
+ *   start    POST /api/competitions/sessions/<id>/start          {}
+ *   submit   POST /api/competitions/sessions/<id>/result         {"format":"SCORE_ATTACK","score":<int>}
+ *   cancel   POST /api/competitions/sessions/<id>/cancel         {}
+ *   whoami   GET  /api/me
  */
 
 /** The free PRACTICE config on the hosted test project (test-game, SCORE_ATTACK, 180s). */
 export const TEST_PANEL_CONFIG_ID = "e3955f36-6ca7-47d2-8c1e-9b95da7b57ac";
 
-export type PanelAction = "create" | "refresh" | "start" | "cancel" | "whoami";
+/**
+ * A well-formed id that no real session has (sessions use gen_random_uuid()). The API answers
+ * an unknown session exactly like another player's session (404), so this exercises the
+ * "not yours" path without ever touching someone else's data.
+ */
+export const UNKNOWN_SESSION_ID = "00000000-0000-4000-8000-000000000000";
+
+export type PanelAction = "create" | "refresh" | "start" | "submit" | "cancel" | "whoami";
 
 export type PanelRequest = { method: "GET" | "POST"; url: string; body: string | null; init: RequestInit };
+
+/** Only `submit` uses options. `score` is sent as given (rejection tests send invalid values on purpose). */
+export type PanelRequestOptions = { score?: number };
 
 type Common = { action: PanelAction; method: string; url: string; requestBody: string | null; durationMs: number; finishedAt: string };
 
@@ -22,31 +40,52 @@ export type PanelResult =
 
 export type PanelSummary = { tone: "success" | "warning" | "error"; title: string; details: string[] };
 
+/** The subset of the API's SessionView the panel uses (taken from real responses only). */
+export type SessionSnapshot = {
+  sessionId: string;
+  status: string;
+  validationStatus: string | null;
+  settlementStatus: string | null;
+  mode: string | null;
+  format: string | null;
+  startedAt: string | null;
+  deadlineAt: string | null;
+  completedAt: string | null;
+  /** SCORE_ATTACK score from `result`, null when no result is stored. */
+  resultScore: number | null;
+  hasResult: boolean;
+};
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function buildPanelRequest(action: PanelAction, sessionId: string | null = null): PanelRequest {
+export function isSessionId(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
+}
+
+export function buildPanelRequest(action: PanelAction, sessionId: string | null = null, opts: PanelRequestOptions = {}): PanelRequest {
   const headers: Record<string, string> = { accept: "application/json" };
   const base: RequestInit = { credentials: "same-origin", cache: "no-store", redirect: "follow" };
+  const post = (url: string, body: string): PanelRequest => ({
+    method: "POST", url, body,
+    init: { ...base, method: "POST", headers: { ...headers, "content-type": "application/json" }, body },
+  });
 
   if (action === "whoami") return { method: "GET", url: "/api/me", body: null, init: { ...base, method: "GET", headers } };
+  if (action === "create") return post("/api/competitions/sessions", JSON.stringify({ configId: TEST_PANEL_CONFIG_ID }));
 
-  if (action === "create") {
-    const body = JSON.stringify({ configId: TEST_PANEL_CONFIG_ID });
-    return {
-      method: "POST", url: "/api/competitions/sessions", body,
-      init: { ...base, method: "POST", headers: { ...headers, "content-type": "application/json" }, body },
-    };
-  }
-
-  if (!sessionId || !UUID.test(sessionId)) throw new Error("A session must be created or loaded first.");
+  if (!isSessionId(sessionId)) throw new Error("A session must be created or loaded first.");
   const path = `/api/competitions/sessions/${encodeURIComponent(sessionId)}`;
-  if (action === "refresh") return { method: "GET", url: path, body: null, init: { ...base, method: "GET", headers } };
-  // start and cancel: the existing routes require a JSON content type and exactly {}.
-  const body = "{}";
-  return {
-    method: "POST", url: `${path}/${action === "start" ? "start" : "cancel"}`, body,
-    init: { ...base, method: "POST", headers: { ...headers, "content-type": "application/json" }, body },
-  };
+  switch (action) {
+    case "refresh":
+      return { method: "GET", url: path, body: null, init: { ...base, method: "GET", headers } };
+    case "submit":
+      if (typeof opts.score !== "number") throw new Error("Enter a score first.");
+      return post(`${path}/result`, JSON.stringify({ format: "SCORE_ATTACK", score: opts.score }));
+    case "start":
+    case "cancel":
+      // The existing routes require a JSON content type and exactly {}.
+      return post(`${path}/${action}`, "{}");
+  }
 }
 
 export async function runPanelRequest(
@@ -54,8 +93,9 @@ export async function runPanelRequest(
   sessionId: string | null,
   fetchImpl: typeof fetch = fetch,
   now: () => number = () => performance.now(),
+  opts: PanelRequestOptions = {},
 ): Promise<PanelResult> {
-  const req = buildPanelRequest(action, sessionId);
+  const req = buildPanelRequest(action, sessionId, opts);
   const started = now();
   const common = () => ({
     action, method: req.method, url: req.url, requestBody: req.body,
@@ -102,29 +142,57 @@ function sessionOf(result: PanelResult): Record<string, unknown> | null {
   return s && typeof s === "object" ? (s as Record<string, unknown>) : null;
 }
 
-/** Session id from a successful create/refresh/cancel response, or null. */
+/** True only for a 2xx response with the standard success envelope. */
+export function isConfirmedSuccess(result: PanelResult): boolean {
+  if (result.kind !== "response" || !result.httpOk || !result.isJson) return false;
+  return asEnvelope(result.body)?.ok === true;
+}
+
+/** Session id from a successful create/refresh/start/submit/cancel response, or null. */
 export function extractSessionId(result: PanelResult): string | null {
-  if (result.kind !== "response" || !result.httpOk) return null;
+  if (!isConfirmedSuccess(result)) return null;
   const id = sessionOf(result)?.sessionId;
-  return typeof id === "string" && UUID.test(id) ? id : null;
+  return isSessionId(id) ? id : null;
 }
 
 /** Session status from a successful response that contains a session, or null. */
 export function extractSessionStatus(result: PanelResult): string | null {
-  if (result.kind !== "response" || !result.httpOk) return null;
-  const status = sessionOf(result)?.status;
-  return typeof status === "string" ? status : null;
+  return extractSession(result)?.status ?? null;
+}
+
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/** The session as reported by a successful response, or null (never fabricated). */
+export function extractSession(result: PanelResult): SessionSnapshot | null {
+  if (!isConfirmedSuccess(result)) return null;
+  const s = sessionOf(result);
+  if (!s || !isSessionId(s.sessionId) || typeof s.status !== "string") return null;
+  const r = s.result && typeof s.result === "object" ? (s.result as Record<string, unknown>) : null;
+  return {
+    sessionId: s.sessionId,
+    status: s.status,
+    validationStatus: str(s.validationStatus),
+    settlementStatus: str(s.settlementStatus),
+    mode: str(s.mode),
+    format: str(s.format),
+    startedAt: str(s.startedAt),
+    deadlineAt: str(s.deadlineAt),
+    completedAt: str(s.completedAt),
+    resultScore: r && typeof r.score === "number" ? r.score : null,
+    hasResult: r !== null,
+  };
 }
 
 /** Start is only offered for a known session whose last reported status is READY (as the DB requires). */
 export function canStart(sessionId: string | null, status: string | null): boolean {
-  return sessionId !== null && UUID.test(sessionId) && status === "READY";
+  return isSessionId(sessionId) && status === "READY";
 }
 
 const SUCCESS_TITLE: Record<PanelAction, string> = {
   create: "Practice session created",
   refresh: "Session loaded",
   start: "Session started",
+  submit: "Result accepted by the API",
   cancel: "Session cancelled",
   whoami: "Signed in",
 };
@@ -138,10 +206,19 @@ function failureHints(action: PanelAction, status: number, code: string, message
     return ["This deployment does not register test-game as an ACTIVE Score Attack game."];
   }
   if (status === 409 && /open session/i.test(message)) {
-    return ["You already have 3 open sessions. Cancel one (Cancel session) or let in-progress ones expire."];
+    return ["You already have 3 open sessions. Cancel one (see Your sessions) or let in-progress ones pass their deadline."];
+  }
+  if (status === 409 && /time limit/i.test(message)) {
+    return ["The deadline (time limit + 30s grace) had passed. The backend marked the session ABANDONED and did NOT store the result."];
   }
   if (status === 409 && action === "start") {
     return ["Start only works while the session is READY (it may already be started, cancelled or finished). Tap Refresh session to see its current status."];
+  }
+  if (status === 409 && action === "submit") {
+    return ["A result can be submitted once, only while the session is IN_PROGRESS (not before Start, not after a result or cancellation)."];
+  }
+  if (status === 409 && action === "cancel") {
+    return ["Only WAITING, READY or IN_PROGRESS sessions can be cancelled. Finished sessions (COMPLETED, CANCELLED, ABANDONED) cannot change."];
   }
   if (status === 409) return ["The session is not in a state that allows this action."];
   if (status === 403 && /paid/i.test(message)) return ["This configuration is PAID. Paid play is disabled; use the free practice config."];
@@ -149,8 +226,9 @@ function failureHints(action: PanelAction, status: number, code: string, message
   if (status === 404) {
     return action === "create"
       ? ["The configuration was not found in this Supabase project (check the project the preview points to)."]
-      : ["Session not found (or it belongs to another account)."];
+      : ["Session not found. The API gives this same answer for unknown sessions and for other players' sessions."];
   }
+  if (status === 400 && action === "submit") return ["The score must be a whole number from 0 to 1,000,000,000,000. Nothing was stored."];
   if (status === 400) return ["The server rejected the request as invalid (see details below)."];
   if (status >= 500) return ["Server error. Check the Vercel function logs for this request; no success was confirmed."];
   return [`Unexpected error code ${code}.`];
@@ -184,7 +262,20 @@ export function summarize(result: PanelResult): PanelSummary {
       : [];
     if (s && typeof s.startedAt === "string") details.push(`Started: ${s.startedAt}`);
     if (s && typeof s.deadlineAt === "string") details.push(`Deadline: ${s.deadlineAt}`);
+    if (s && typeof s.completedAt === "string") details.push(`Completed: ${s.completedAt}`);
+    const snap = extractSession(result);
+    if (snap?.hasResult) details.push(`Stored result: ${snap.resultScore ?? "(no score)"}`);
     if (result.action === "create" && result.httpStatus !== 201) details.push(`Note: expected HTTP 201, got ${result.httpStatus}.`);
+    if (result.action === "submit") {
+      details.push(
+        snap?.status === "COMPLETED"
+          ? "Session completion: the backend reports COMPLETED in this response."
+          : `Session completion: NOT reported (status is ${snap?.status ?? "unknown"}).`,
+      );
+      if (snap?.validationStatus === "UNVERIFIED") {
+        details.push("Validation UNVERIFIED: the score is stored but NOT verified. Practice results are never verified.");
+      }
+    }
     return { tone: "success", title: `${SUCCESS_TITLE[result.action]} (HTTP ${result.httpStatus})`, details };
   }
   if (!env.ok) {

@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/ui";
 import { isGameFormatAvailable } from "@/games/registry";
 import { getCurrentUser } from "@/server/auth";
 import { isTestPanelEnabled, loadTestConfig } from "./load-config";
+import { loadMySessions } from "./load-sessions";
 import { TestPanel } from "./TestPanel";
 
 /**
@@ -23,7 +24,7 @@ export default async function TestPanelPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const config = await loadTestConfig();
+  const [config, sessions] = await Promise.all([loadTestConfig(), loadMySessions(user.id)]);
 
   return (
     <div className="stack-lg">
@@ -32,7 +33,12 @@ export default async function TestPanelPage() {
         title="Competition Test Panel"
         intro="Test free practice sessions against the real API from your phone. Not a player feature."
       />
-      <TestPanel email={user.email ?? null} config={config} registryReady={isGameFormatAvailable("test-game", "SCORE_ATTACK")} />
+      <TestPanel
+        email={user.email ?? null}
+        config={config}
+        registryReady={isGameFormatAvailable("test-game", "SCORE_ATTACK")}
+        sessions={sessions}
+      />
     </div>
   );
 }

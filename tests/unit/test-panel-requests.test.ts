@@ -4,8 +4,11 @@ import {
   buildPanelRequest,
   canStart,
   displayBody,
+  extractSession,
   extractSessionId,
   extractSessionStatus,
+  isConfirmedSuccess,
+  UNKNOWN_SESSION_ID,
   runPanelRequest,
   summarize,
   type PanelResult,
@@ -192,6 +195,97 @@ describe("start", () => {
     expect(extractSessionStatus(nf)).toBeNull();
     const net = await runPanelRequest("start", SESSION, vi.fn<typeof fetch>(async () => { throw new TypeError("Load failed"); }));
     expect(extractSessionStatus(net)).toBeNull();
+  });
+});
+
+describe("result submission", () => {
+  it("posts exactly {format:SCORE_ATTACK, score} as JSON to the session's result route, with no identity", () => {
+    const r = buildPanelRequest("submit", SESSION, { score: 4200 });
+    expect(r).toMatchObject({ method: "POST", url: `/api/competitions/sessions/${SESSION}/result` });
+    expect(JSON.parse(r.body ?? "")).toEqual({ format: "SCORE_ATTACK", score: 4200 });
+    expect(r.init).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store" });
+    expect(r.init.headers).toMatchObject({ "content-type": "application/json" });
+    expect(JSON.stringify(r).toLowerCase()).not.toMatch(/user_?id|authorization|bearer|token/);
+  });
+
+  it("refuses to build a submission without a session or a score", () => {
+    expect(() => buildPanelRequest("submit", null, { score: 1 })).toThrow();
+    expect(() => buildPanelRequest("submit", SESSION)).toThrow(/score/i);
+  });
+
+  it("accepted result: distinguishes API acceptance, completion and (non-)validation", async () => {
+    const body = sessionBody({ status: "COMPLETED", validationStatus: "UNVERIFIED", completedAt: "2026-10-11T12:02:00Z", result: { format: "SCORE_ATTACK", score: 4200 } });
+    const r = await runPanelRequest("submit", SESSION, fakeFetch(200, body), undefined, { score: 4200 });
+    const s = summarize(r);
+    expect(s).toMatchObject({ tone: "success", title: "Result accepted by the API (HTTP 200)" });
+    expect(s.details).toEqual(expect.arrayContaining([
+      "Stored result: 4200",
+      "Session completion: the backend reports COMPLETED in this response.",
+      "Validation UNVERIFIED: the score is stored but NOT verified. Practice results are never verified.",
+    ]));
+    expect(s.details).toContain("Validation: UNVERIFIED");
+    expect(s.details).not.toContain("Validation: VERIFIED"); // never claims verification
+  });
+
+  it("an accepted response that does not report COMPLETED does not claim completion", async () => {
+    const r = await runPanelRequest("submit", SESSION, fakeFetch(200, sessionBody({ status: "SUBMITTED", validationStatus: "PENDING" })), undefined, { score: 1 });
+    expect(summarize(r).details).toContain("Session completion: NOT reported (status is SUBMITTED).");
+  });
+
+  it.each([
+    [409, "That action is not allowed in the session's current state.", /submitted once, only while the session is IN_PROGRESS/],
+    [409, "The time limit for this session has passed.", /marked the session ABANDONED and did NOT store the result/],
+    [400, "Invalid input.", /whole number from 0 to 1,000,000,000,000/],
+    [404, "Session not found.", /same answer for unknown sessions and for other players' sessions/],
+  ])("rejected submission HTTP %i is explained", async (status, message, hint) => {
+    const code = status === 409 ? "CONFLICT" : status === 400 ? "VALIDATION_ERROR" : "NOT_FOUND";
+    const r = await runPanelRequest("submit", SESSION, fakeFetch(status, envelopeError(code, message)), undefined, { score: 1 });
+    const s = summarize(r);
+    expect(s.tone).toBe("error");
+    expect(s.details[0]).toBe(message);
+    expect(s.details.join(" ")).toMatch(hint);
+    expect(extractSession(r)).toBeNull();
+  });
+
+  it("cancel refusals are explained", async () => {
+    const r = await runPanelRequest("cancel", SESSION, fakeFetch(409, envelopeError("CONFLICT", "That action is not allowed in the session's current state.")));
+    expect(summarize(r).details.join(" ")).toMatch(/Only WAITING, READY or IN_PROGRESS sessions can be cancelled/);
+  });
+});
+
+describe("session snapshots come only from confirmed successes", () => {
+  it("extracts the fields the panel uses", async () => {
+    const r = await runPanelRequest("refresh", SESSION, fakeFetch(200, sessionBody({
+      status: "COMPLETED", validationStatus: "UNVERIFIED", startedAt: "a", deadlineAt: "b", completedAt: "c", result: { format: "SCORE_ATTACK", score: 7 },
+    })));
+    expect(extractSession(r)).toEqual({
+      sessionId: SESSION, status: "COMPLETED", validationStatus: "UNVERIFIED", settlementStatus: "NOT_REQUIRED",
+      mode: "PRACTICE", format: "SCORE_ATTACK", startedAt: "a", deadlineAt: "b", completedAt: "c", resultScore: 7, hasResult: true,
+    });
+  });
+
+  it("returns null for errors, non-JSON, odd shapes and envelopes that disagree with the status", async () => {
+    expect(extractSession(await runPanelRequest("refresh", SESSION, fakeFetch(404, envelopeError("NOT_FOUND", "Session not found."))))).toBeNull();
+    expect(extractSession(await runPanelRequest("refresh", SESSION, fakeFetch(200, null, "<html/>")))).toBeNull();
+    expect(extractSession(await runPanelRequest("refresh", SESSION, fakeFetch(200, { ok: true, data: { session: { sessionId: "x", status: "READY" } } })))).toBeNull();
+    const disagree = await runPanelRequest("refresh", SESSION, fakeFetch(500, sessionBody()));
+    expect(isConfirmedSuccess(disagree)).toBe(false);
+    expect(extractSession(disagree)).toBeNull();
+  });
+
+  it("success needs BOTH a 2xx status and an ok:true JSON envelope (never claimed otherwise)", async () => {
+    expect(isConfirmedSuccess(await runPanelRequest("submit", SESSION, fakeFetch(200, sessionBody({ status: "COMPLETED" })), undefined, { score: 1 }))).toBe(true);
+    for (const body of [{ ok: false, error: { code: "CONFLICT", message: "x" } }, { data: { session: {} } }, { ok: "true" }, [], "ok", null]) {
+      const r = await runPanelRequest("submit", SESSION, fakeFetch(200, body), undefined, { score: 1 });
+      expect(isConfirmedSuccess(r), JSON.stringify(body)).toBe(false);
+      expect(summarize(r).tone, JSON.stringify(body)).not.toBe("success");
+    }
+    expect(isConfirmedSuccess(await runPanelRequest("submit", SESSION, fakeFetch(200, null, "<html>ok</html>"), undefined, { score: 1 }))).toBe(false);
+  });
+
+  it("the unknown-session id is well-formed, so requests reach the API (which answers 404)", () => {
+    expect(buildPanelRequest("refresh", UNKNOWN_SESSION_ID).url).toBe(`/api/competitions/sessions/${UNKNOWN_SESSION_ID}`);
+    expect(buildPanelRequest("cancel", UNKNOWN_SESSION_ID).url).toBe(`/api/competitions/sessions/${UNKNOWN_SESSION_ID}/cancel`);
   });
 });
 
