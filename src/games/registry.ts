@@ -1,13 +1,16 @@
 import { gameManifestSchema, type GameManifest, type GameType } from "@/game-sdk";
+import { manifest as testGame } from "./test-game/manifest";
 
 /**
- * Platform game catalogue. Each integrated game will contribute its `manifest.ts`
- * (see src/games/README.md) and be listed here. NO games are integrated yet, so
- * this list is intentionally empty and the Games UI shows its empty state.
+ * Platform game catalogue. Each integrated game contributes its `manifest.ts`
+ * (see src/games/README.md) and is listed here. NO real games are integrated yet.
+ *
+ * `test-game` is a TEMPORARY, non-playable entry used to test competition sessions
+ * end to end (see src/games/test-game/manifest.ts). Remove it before launch.
  *
  * Manifests are validated against the Game SDK schema at load time.
  */
-const MANIFESTS: readonly unknown[] = [];
+const MANIFESTS: readonly unknown[] = [testGame];
 
 export const GAMES: readonly GameManifest[] = MANIFESTS.map((m) => gameManifestSchema.parse(m));
 

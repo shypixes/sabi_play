@@ -1,5 +1,80 @@
 SABI PLAY BUILD LOG
-Current Version: v1.2.0 (competition foundation; live Supabase verification pending)
+Current Version: v1.2.1 (temporary test-game registered; live Supabase verification pending)
+=====================================
+v1.2.1 — PATCH: TEMPORARY TEST GAME FOR COMPETITION TESTING
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, real-PostgreSQL and
+production-build checks pass. NOT yet verified against the hosted Supabase project.
+Version note: patch bump. Test scaffolding only; no new platform capability, no
+schema change, no migration.
+
+Why:
+- Migration 0004 is applied on the hosted project with one DISABLED config
+  (id e3955f36-6ca7-47d2-8c1e-9b95da7b57ac, test-game, SCORE_ATTACK, PRACTICE,
+  180s). The registry was empty, so POST /api/competitions/sessions refused every
+  config with 409 "This game is not available." before reaching the database.
+
+Implemented:
+- src/games/test-game/manifest.ts: id "test-game", name "Test Game (temporary,
+  not playable)", version 0.0.1, formats ["SCORE_ATTACK"], status ACTIVE.
+  Uses the existing manifest schema unchanged (strict zod validation at load).
+- src/games/registry.ts lists it, the same way future games will be listed.
+- No gameplay code. The game card shows the name and the "Score Attack" badge
+  only; there is no launch control (unchanged GameCard).
+- Visible effect: the Games page and the Home dashboard now show one card
+  "Test Game (temporary, not playable)" instead of their empty states. The
+  configs API now returns enabled test-game SCORE_ATTACK configs.
+- Unchanged: no wallet operations, no paid play (the DB still raises
+  paid_competitions_disabled), no new configs, no migration. test-game
+  ONE_V_ONE configs are still refused (format not declared).
+
+Files:
+- New: src/games/test-game/manifest.ts, tests/unit/game-registry.test.ts,
+  tests/integration/competitions-test-game.test.ts,
+  tests/db/test-game-rehearsal.test.ts
+- Modified: src/games/registry.ts, src/games/README.md, BUILD_LOG.txt
+
+Tests actually run (all PASS):
+- npm run typecheck: PASS.
+- npm test: 62/62 (unit 37, mocked integration 25). New: real registry has
+  exactly test-game (ACTIVE, SCORE_ATTACK only, labelled temporary/not playable,
+  strict schema); create-session with the REAL registry: test-game SCORE_ATTACK
+  reaches the DB with only {p_config_id}; test-game ONE_V_ONE, unregistered game
+  and unknown config are refused before the DB; DB refusals for disabled (409)
+  and paid (403) configs mapped correctly; config list keeps only test-game
+  SCORE_ATTACK rows and queries enabled=true. Supabase is MOCKED in these.
+- npm run test:db: 64/64 on real local PostgreSQL 17.10 (migrations 0001-0004 +
+  Supabase shim). New rehearsal of the hosted config: refused while disabled;
+  enabling is allowed, price/mode changes are not; enabled -> READY session ->
+  start -> score -> UNVERIFIED; wallet and ledger unchanged; other players cannot
+  see it; disabling again stops new sessions.
+- Mutation check: 5 injected registry mistakes (status DRAFT, extra ONE_V_ONE,
+  label removed, not registered, format gate removed) were all caught.
+- next build (production, placeholder public env): PASS.
+
+Manual steps for the hosted test (not done by this change):
+1. SQL editor: update public.competition_configs set enabled = true
+   where id = 'e3955f36-6ca7-47d2-8c1e-9b95da7b57ac';
+2. On the Vercel PREVIEW for this commit (production deploys main, which does
+   not have the competition API), log in and in the browser console run:
+   fetch('/api/competitions/sessions', {method:'POST',
+     headers:{'content-type':'application/json'},
+     body: JSON.stringify({configId:'e3955f36-6ca7-47d2-8c1e-9b95da7b57ac'})})
+     .then(r => r.json()).then(console.log)
+   Expected: 201 with status READY, settlementStatus NOT_REQUIRED.
+3. Preview deployments must have NEXT_PUBLIC_SUPABASE_URL/ANON_KEY set for the
+   Preview environment in Vercel, and Supabase Auth must allow the preview URL.
+
+Known limitations:
+- test-game is visible to every signed-in user wherever this code is deployed
+  (including production once merged to main). Remove before launch: delete
+  src/games/test-game, remove it from registry.ts, disable its configs.
+- No browser UI creates sessions yet; testing is via the API.
+
+Next milestone:
+- Run the hosted test above and record real results; then Game SDK browser
+  runtime + first real SCORE_ATTACK practice game.
+
 =====================================
 v1.2.0 — COMPETITION FOUNDATION (CONFIGS, SESSIONS, RESULTS, VALIDATION STATE)
 =====================================
