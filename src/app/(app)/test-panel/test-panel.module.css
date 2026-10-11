@@ -1,0 +1,39 @@
+/* TEMPORARY competition test panel styles. Remove with the whole folder before launch. */
+
+.banner {
+  padding: 12px 14px; border-radius: var(--r); font-size: .95rem;
+  color: var(--warn); background: rgba(251, 191, 36, .1); border: 1px solid rgba(251, 191, 36, .35);
+}
+.card {
+  display: grid; gap: 10px; padding: 16px; border-radius: var(--r);
+  background: var(--surface); border: 1px solid var(--line); min-width: 0;
+}
+.h2 { margin: 0; font-size: 1.05rem; }
+.kv { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin: 0; font-size: .92rem; }
+.kv > span { color: var(--muted); }
+.wrap { overflow-wrap: anywhere; word-break: break-word; text-align: right; }
+.ok { color: var(--accent); }
+.bad { color: var(--err); }
+.warn { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); color: var(--warn); background: rgba(251, 191, 36, .08); font-size: .92rem; }
+.small { margin: 0; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.btn { width: 100%; }
+.row { display: grid; gap: 8px; grid-template-columns: 1fr; }
+@media (min-width: 560px) { .row { grid-template-columns: repeat(3, 1fr); } }
+.live { min-height: 24px; }
+.pending { display: flex; align-items: center; gap: 10px; margin: 0; font-weight: 600; }
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%; flex: none;
+  border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+.summary { padding: 12px 14px; border-radius: var(--r-sm); border: 1px solid; }
+.summary ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: .92rem; overflow-wrap: anywhere; }
+.success { color: var(--accent); background: var(--accent-soft); border-color: rgba(74, 222, 128, .35); }
+.warning { color: var(--warn); background: rgba(251, 191, 36, .08); border-color: rgba(251, 191, 36, .35); }
+.error { color: var(--err); background: rgba(248, 113, 113, .08); border-color: rgba(248, 113, 113, .35); }
+.pre {
+  margin: 0; padding: 12px; max-height: 60vh; overflow: auto; border-radius: var(--r-sm);
+  background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+  font-size: .78rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-overflow-scrolling: touch;
+}

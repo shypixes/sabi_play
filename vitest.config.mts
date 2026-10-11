@@ -10,6 +10,9 @@ import { defineConfig } from "vitest/config";
  *                 Proves constraints, triggers, grants and RLS on Postgres; not hosted Supabase.
  */
 export default defineConfig({
+  // tsconfig keeps `jsx: "preserve"` for Next.js; tests that render components need Vite to
+  // compile JSX itself (React automatic runtime). Affects tests only, not the Next build.
+  oxc: { jsx: { runtime: "automatic" } },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

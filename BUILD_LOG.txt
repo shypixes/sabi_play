@@ -1,5 +1,80 @@
 SABI PLAY BUILD LOG
-Current Version: v1.2.1 (temporary test-game registered; live Supabase verification pending)
+Current Version: v1.2.2 (temporary Competition Test Panel; live Supabase verification pending)
+=====================================
+v1.2.2 — PATCH: TEMPORARY COMPETITION TEST PANEL (/test-panel)
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, simulated-DOM,
+real-PostgreSQL and production-build checks pass. NOT yet verified against the
+hosted Supabase project or on a real phone.
+Version note: patch bump. Temporary test tooling; no platform capability, no
+schema change, no migration, no API change.
+
+Why:
+- Testing POST /api/competitions/sessions needed browser devtools, which are not
+  available on iPhone. This page runs the same request from a button.
+
+Implemented (all inside src/app/(app)/test-panel/):
+- page.tsx: /test-panel. Signed-in users only (the (app) layout and the page both
+  check getCurrentUser() server-side and redirect to /login). Returns 404 when
+  VERCEL_ENV=production. force-dynamic, noindex. Not linked from the nav.
+- load-config.ts (server-only): reads the fixed test config
+  e3955f36-6ca7-47d2-8c1e-9b95da7b57ac with the user's normal RLS-scoped
+  client, validates it with the existing config schema, and shows label, game,
+  format, mode, fee, time limit and enabled. DB error text is logged, not shown.
+- TestPanel.tsx (client): auth status, config, registry availability, and the
+  "Create Practice Session" button. It sends
+  POST /api/competitions/sessions {"configId":"e3955f36-..."} same-origin with
+  the existing cookie session. It never asks for or sends a user id, token or
+  config id. Loading spinner and aria-live status. Buttons are disabled while
+  pending, plus an in-flight guard against double taps. Shows the HTTP status,
+  the complete JSON body and a success/failure summary with hints (401, 409
+  disabled / game unavailable / too many open sessions, 403, 404, 400, 5xx,
+  non-JSON, network failure). Warns that each success creates a real (free) DB
+  session. Also: Refresh session (GET), Cancel session (POST .../cancel, with
+  confirmation; needed because of the 3-open-session limit), Clear result, and
+  Check sign-in (GET /api/me). Nothing is requested on page load.
+- panel-requests.ts: request building and response interpretation (pure,
+  tested). test-panel.module.css: mobile-first styles.
+- Unchanged: all API routes, DB, registry, Home/Games/Wallet/Profile, nav,
+  middleware. No wallet, payment or paid functionality.
+
+Files:
+- New: src/app/(app)/test-panel/{page.tsx,TestPanel.tsx,load-config.ts,
+  panel-requests.ts,test-panel.module.css},
+  tests/unit/test-panel-requests.test.ts,
+  tests/unit/test-panel-component.test.ts,
+  tests/integration/test-panel-page.test.ts
+- Modified: vitest.config.mts (oxc JSX automatic runtime, tests only),
+  package.json (devDependency jsdom, used only by the component test),
+  BUILD_LOG.txt
+
+Tests actually run (all PASS):
+- npm run typecheck: PASS.
+- Unit + mocked integration: 99/99 (37 new). Request shape (exact body,
+  same-origin, no identity or auth headers), every error state, non-JSON body,
+  network failure, inconsistent envelopes never shown as success. Simulated DOM
+  (jsdom, fake fetch): no request on load; pending state disables the button;
+  repeated or simultaneous taps send one request; failures are not counted;
+  Clear and Refresh never create; Cancel requires confirmation. Page render with
+  fake Supabase: 404 in production, /login redirect when signed out, config
+  states (enabled, disabled, missing, invalid, error), no secrets in the HTML.
+- Mutation check: 5 injected panel bugs (ref guard removed, button not disabled,
+  auto-create on load, fabricated success, cancel without confirm) all caught.
+- npm run test:db: 64/64 on real local PostgreSQL 17.10 (unchanged; no schema).
+- next build (production, placeholder public env): PASS; /test-panel is dynamic;
+  no server-only code or service-role references in client chunks.
+
+To use (hosted preview):
+1. Enable the config (SQL editor): update public.competition_configs set
+   enabled = true where id = 'e3955f36-6ca7-47d2-8c1e-9b95da7b57ac';
+2. Open <preview URL>/test-panel, log in, tap "Create Practice Session".
+   Expected: HTTP 201, status READY, settlement NOT_REQUIRED.
+3. Cancel test sessions when done (limit: 3 open sessions per player).
+
+REMOVE BEFORE LAUNCH: delete src/app/(app)/test-panel/ and
+tests/unit/test-panel-*.test.ts and tests/integration/test-panel-page.test.ts.
+Optionally drop jsdom from devDependencies and the oxc line in vitest.config.mts.
+
 =====================================
 v1.2.1 — PATCH: TEMPORARY TEST GAME FOR COMPETITION TESTING
 =====================================
