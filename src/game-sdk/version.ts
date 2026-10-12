@@ -1,14 +1,20 @@
 /**
  * Game SDK versioning.
  *
- * - SDK_VERSION follows semantic versioning. Games declare the SDK range they support in their
- *   manifest (`sdk.min` inclusive, `sdk.maxExclusive` exclusive) and the platform refuses to
- *   register or launch a game whose range does not include SDK_VERSION.
- * - PROTOCOL_VERSION is the version of the host <-> game message contract (src/game-sdk/protocol.ts).
- *   It changes only with a breaking message change, which also requires a new SDK major version.
+ * - SDK_VERSION follows semantic versioning of the PUBLIC game API (GameSdk, manifest schema).
+ *   Games declare the SDK range they support in their manifest (`sdk.min` inclusive,
+ *   `sdk.maxExclusive` exclusive) and the platform refuses to register or launch a game whose
+ *   range does not include SDK_VERSION.
+ * - PROTOCOL_VERSION is the version of the host <-> SDK-client wire contract (messages in
+ *   src/game-sdk/protocol.ts and how they are carried). Games never bundle the SDK client: it
+ *   ships in the platform's frame document, so host and client always change together, and a
+ *   frame from an older deploy is refused at hello. A wire change that leaves the public API
+ *   unchanged bumps PROTOCOL_VERSION without a new SDK major version.
+ *   v2 (SDK 1.0.1): after the handshake all messages travel over a private MessageChannel port
+ *   transferred with "init" (bound to the game document; see client.ts / controller.ts).
  */
-export const SDK_VERSION = "1.0.0";
-export const PROTOCOL_VERSION = 1;
+export const SDK_VERSION = "1.0.1";
+export const PROTOCOL_VERSION = 2;
 
 /** Strict MAJOR.MINOR.PATCH (no pre-release or build suffix; leading zeros not allowed). */
 export const SEMVER_PATTERN = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;

@@ -10,6 +10,7 @@ import {
   type GamePlatformApi,
   type HostMessage,
   type InboundMessage,
+  type MessagePortLike,
   type OfficialTimingInfo,
   type RejectionReason,
   type SessionContext,
@@ -53,6 +54,12 @@ export type HostState = {
   /** User-facing explanation for the current phase (safe to display). */
   readonly message: string | null;
   readonly violations: number;
+  /**
+   * True once the game frame is known to hold a different document (it navigated or reloaded).
+   * From then on the frame is never trusted again: no messages are accepted from it or sent to
+   * it, its channel is closed, and the platform stops displaying it.
+   */
+  readonly frameRevoked: boolean;
 };
 
 export type LaunchInfo = {
@@ -63,9 +70,16 @@ export type LaunchInfo = {
   gameConfig: GameConfig;
 };
 
-/** The game frame: where to post and how to recognise its messages. */
+/**
+ * The game frame. Only "init" travels through the frame window: openChannel posts it together
+ * with one end of a new MessageChannel and returns the other end. Every later message, in both
+ * directions, uses that private port, which belongs to the document that received "init".
+ */
 export interface FrameChannel {
+  /** Posts to the frame window. Used only before the channel exists (protocol errors before init). */
   post(message: HostMessage): void;
+  /** Posts init with a transferred port to the frame; returns the host end, or null if the frame is gone. */
+  openChannel(init: HostMessage): MessagePortLike | null;
   /** True only for messages whose source is this frame's window (and the sandbox origin). */
   isFromGame(message: InboundMessage): boolean;
 }
@@ -97,10 +111,14 @@ type Reconciled =
   | { kind: "unknown" };
 
 export class GameHostController {
-  private state: HostState = { phase: "idle", session: null, timing: null, outcome: null, message: null, violations: 0 };
+  private state: HostState = { phase: "idle", session: null, timing: null, outcome: null, message: null, violations: 0, frameRevoked: false };
   private readonly listeners = new Set<() => void>();
   private frame: FrameChannel | null = null;
+  /** Host end of the private channel to the game document (after init). */
+  private port: MessagePortLike | null = null;
+  private readonly onPortMessage = (event: { data: unknown }) => this.receiveFromChannel(event.data);
   private helloSeen = false;
+  private frameLoads = 0;
   private submission: { id: string; score: number } | null = null;
   private readyTimer: unknown = null;
   private disposed = false;
@@ -134,13 +152,64 @@ export class GameHostController {
   // ---- frame wiring ------------------------------------------------------------------
 
   attachFrame(frame: FrameChannel | null): void {
-    this.frame = frame;
+    // A revoked frame stays revoked, even if the UI re-attaches its channel.
+    this.frame = this.state.frameRevoked ? null : frame;
   }
 
+  /**
+   * Call on EVERY load event of the game iframe. The first load is the platform's game document
+   * (the frame only runs game code after that load; see src/app/game-frame/[gameId]/boot.ts).
+   * Any later load means the frame navigated or reloaded, e.g. game code sent it to another site.
+   * The new document is not the platform's game frame, so it is no longer trusted: the channel is
+   * dropped (nothing more is accepted from or sent to it) and the attempt is ended.
+   *  - Before any result was received: the open session is cancelled through the normal route
+   *    (READY -> CANCELLED, IN_PROGRESS -> ABANDONED) and the host shows a failure.
+   *  - After a result was received (submitting / completed / rejected / unresolved): result
+   *    handling continues unchanged; only the frame is dropped.
+   */
+  frameLoaded(): void {
+    if (this.disposed) return;
+    this.frameLoads += 1;
+    if (this.frameLoads === 1) return;
+    this.revokeFrame();
+  }
+
+  /**
+   * The frame holds a different document than the one we handshook with (second load event, or a
+   * protocol message on the window after the channel exists). Never trust it again.
+   */
+  private revokeFrame(): void {
+    if (this.disposed || this.state.frameRevoked) return;
+    this.frame = null;
+    this.closePort();
+    this.clearReadyTimer();
+    this.set({ frameRevoked: true });
+    const phase = this.state.phase;
+    if (this.submission || this.isFinal() || phase === "idle" || phase === "creating") return;
+    this.set({ phase: "failed", message: "The game left its frame (it navigated away or reloaded), so this attempt was ended." });
+    const session = this.state.session;
+    if (session && OPEN_STATUSES.has(session.status)) void this.cancelQuietly();
+  }
+
+  private envelope(type: HostMessage["type"], sessionId: string, payload: HostMessage["payload"]): HostMessage {
+    return { channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type, sessionId, payload } as HostMessage;
+  }
+
+  /** After init, messages go ONLY over the private port; never to whatever document the window holds. */
   private post<T extends HostMessage["type"]>(type: T, payload: Extract<HostMessage, { type: T }>["payload"]): void {
     const session = this.state.session;
     if (!this.frame || !session || this.disposed) return;
-    this.frame.post({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type, sessionId: session.sessionId, payload } as HostMessage);
+    const message = this.envelope(type, session.sessionId, payload);
+    if (this.port) this.port.postMessage(message);
+    else this.frame.post(message);
+  }
+
+  /** Only where nothing was just posted (closing can drop messages still in flight). */
+  private closePort(): void {
+    if (!this.port) return;
+    this.port.removeEventListener("message", this.onPortMessage);
+    this.port.close();
+    this.port = null;
   }
 
   private violation(code: string, message: string): void {
@@ -167,9 +236,18 @@ export class GameHostController {
 
   // ---- inbound game messages ---------------------------------------------------------
 
-  /** Feed every window "message" event here; anything not from our frame is ignored. */
+  /**
+   * Feed every window "message" event here; anything not from our frame is ignored. The window
+   * carries only the handshake (hello). Once the private channel exists, the game document talks
+   * over its port, so a protocol message from the frame window comes from a DIFFERENT document
+   * (the frame navigated or reloaded): the frame is revoked without acting on the message.
+   */
   receive(event: InboundMessage): void {
     if (this.disposed || !this.frame || !this.frame.isFromGame(event)) return;
+    if (this.port) {
+      if (isOnChannel(event.data)) this.revokeFrame();
+      return;
+    }
     const msg = parseGameMessage(event.data);
     if (!msg) {
       this.violation(isOnChannel(event.data) ? "MALFORMED_MESSAGE" : "UNKNOWN_MESSAGE", "Message rejected: invalid shape, size or channel.");
@@ -181,6 +259,25 @@ export class GameHostController {
     }
     if (msg.type === "hello") {
       this.onHello(msg);
+      return;
+    }
+    this.violation("UNEXPECTED_MESSAGE", "Only hello is accepted before the session context.");
+  }
+
+  /** Messages on the private port. The port itself is the proof of origin (only the game document holds it). */
+  private receiveFromChannel(data: unknown): void {
+    if (this.disposed || !this.port) return;
+    const msg = parseGameMessage(data);
+    if (!msg) {
+      this.violation(isOnChannel(data) ? "MALFORMED_MESSAGE" : "UNKNOWN_MESSAGE", "Message rejected: invalid shape, size or channel.");
+      return;
+    }
+    if (msg.protocol !== PROTOCOL_VERSION) {
+      this.violation("PROTOCOL_MISMATCH", `Protocol ${msg.protocol} is not supported (expected ${PROTOCOL_VERSION}).`);
+      return;
+    }
+    if (msg.type === "hello") {
+      this.violation("UNEXPECTED_MESSAGE", "hello is only sent once, before the session context.");
       return;
     }
     const session = this.state.session;
@@ -216,7 +313,15 @@ export class GameHostController {
       this.terminate("host_error", `The game uses SDK ${msg.payload.sdkVersion}, which this platform (SDK ${SDK_VERSION}) does not support.`);
       return;
     }
-    this.post("init", { context: this.context() });
+    const session = this.state.session;
+    const port = session && this.frame ? this.frame.openChannel(this.envelope("init", session.sessionId, { context: this.context() })) : null;
+    if (!port) {
+      this.terminate("host_error", "Could not open a channel to the game.");
+      return;
+    }
+    this.port = port;
+    port.addEventListener("message", this.onPortMessage);
+    port.start();
     this.set({ phase: "awaiting_ready", message: "Loading the game…" });
   }
 
@@ -375,6 +480,7 @@ export class GameHostController {
   /** Stop everything (component unmount). Late responses are ignored. */
   dispose(): void {
     this.clearReadyTimer();
+    this.closePort();
     this.frame = null;
     this.set({ phase: "closed" });
     this.disposed = true;

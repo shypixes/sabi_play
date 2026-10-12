@@ -1,6 +1,9 @@
 # Sabi Play Game SDK v1
 
-`SDK_VERSION = "1.0.0"`, `PROTOCOL_VERSION = 1` (`version.ts`).
+`SDK_VERSION = "1.0.1"`, `PROTOCOL_VERSION = 2` (`version.ts`). The SDK version tracks the public
+game API below. The protocol version tracks the host <-> SDK-client wire contract, which ships inside
+the platform (games never bundle it). Protocol 2 moved all post-handshake messages onto a private
+MessageChannel; the public API did not change.
 
 Games import ONLY from `@/game-sdk` and their own folder (`tests/unit/boundaries.test.ts` enforces
 this). They never import `@/server`, `@/lib/*`, Supabase, wallets or payments, and never call an
@@ -123,13 +126,21 @@ manifest.
 
 ## Protocol (`protocol.ts`, for platform code)
 
-Each message uses the envelope `{channel: "sabi-play.game", protocol: 1, type, sessionId, payload}`,
+Each message uses the envelope `{channel: "sabi-play.game", protocol: 2, type, sessionId, payload}`,
 validated strictly with zod and capped at 4096 bytes.
 - **Host → game:** `init`, `start`, `pause`, `resume`, `terminate`, `submit-result`, `error`.
 - **Game → host:** `hello`, `ready`, `submit {submissionId, score, gameVersion}`, `error {fatal}`,
   `exit`.
 
-Each side accepts messages only from the expected window. The game frame has an opaque `"null"`
-origin, and the host checks that origin. Messages are also checked for session id, protocol version
-and an allowed sequence. Anything else is dropped, and the host terminates the game after 10
-violations.
+Transport:
+- **Handshake (window):** the SDK posts `hello` to its parent. The host accepts it only from this
+  iframe's window with the sandbox's opaque `"null"` origin, once, while loading. The host replies
+  with `init` and transfers one end of a new `MessageChannel` with it. The SDK accepts `init` only
+  from its parent window with the platform's origin, and only if it carries a port.
+- **Everything after `init` (port):** both sides send and receive only on that port. The SDK ignores
+  host messages on the window from then on. The host treats any protocol message on the frame window
+  after the handshake as a different document (the frame navigated or reloaded) and revokes the
+  frame, as it does on a second iframe load event. See docs/architecture.md, layer 5.
+
+Messages are also checked for session id, protocol version and an allowed sequence. Anything else is
+dropped, and the host terminates the game after 10 violations.

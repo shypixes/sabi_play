@@ -70,10 +70,19 @@ export function GameHost({ launch, gameName, orientations, capabilities }: Props
   // Wire the frame: messages are accepted only from THIS iframe's window, with the sandbox's opaque origin.
   useEffect(() => {
     controller.attachFrame({
+      // "*" is required for window posts: a sandboxed frame has an opaque origin that cannot be
+      // named, so the window cannot pin WHICH document receives them. Only pre-init protocol errors
+      // and init itself use the window; init transfers a private port that carries everything else,
+      // so a document that replaces the game later gets nothing. Messages never contain credentials.
       post(message: HostMessage) {
-        // "*" is required: a sandboxed frame has an opaque origin that cannot be named. Delivery is
-        // bound to this iframe's window, and messages never contain credentials.
         frameRef.current?.contentWindow?.postMessage(message, "*");
+      },
+      openChannel(init: HostMessage) {
+        const target = frameRef.current?.contentWindow;
+        if (!target) return null;
+        const channel = new MessageChannel();
+        target.postMessage(init, "*", [channel.port2]);
+        return channel.port1;
       },
       isFromGame: (m) => m.origin === "null" && m.source !== null && m.source === frameRef.current?.contentWindow,
     });
@@ -101,8 +110,9 @@ export function GameHost({ launch, gameName, orientations, capabilities }: Props
     void next.createSession();
   }, [launch]);
 
-  const { phase, session, outcome, message } = state;
-  const showFrame = FRAME_PHASES.has(phase) && session !== null;
+  const { phase, session, outcome, message, frameRevoked } = state;
+  // A frame that navigated away (frameRevoked) is removed: its new document is not ours.
+  const showFrame = FRAME_PHASES.has(phase) && session !== null && !frameRevoked;
 
   // Bring the whole stage (with Start and Exit) into view when a game loads, on small phones too.
   const sessionId = showFrame ? session.sessionId : null;
@@ -152,6 +162,7 @@ export function GameHost({ launch, gameName, orientations, capabilities }: Props
             title={`${gameName} game`}
             src={`/game-frame/${encodeURIComponent(launch.gameId)}`}
             sandbox="allow-scripts"
+            onLoad={() => controller.frameLoaded()}
             allow={permissionsFor(capabilities)}
             referrerPolicy="no-referrer"
           />

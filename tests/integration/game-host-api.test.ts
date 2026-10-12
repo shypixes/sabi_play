@@ -118,7 +118,7 @@ function harness(gameId = "pop-rush") {
     launch: { gameId, gameVersion: "1.0.0", configId: CONFIG, timeLimitSeconds: 180, gameConfig: {} },
     now: clock.now, sleep: async () => undefined, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
   });
-  controller.attachFrame({ post: (m) => env.deliver(m), isFromGame: (m) => m.source === frame && m.origin === "null" });
+  controller.attachFrame({ post: (m) => env.deliver(m), openChannel: (init) => env.openChannel(init), isFromGame: (m) => m.source === frame && m.origin === "null" });
   env.onPost = (m) => controller.receive({ data: m, origin: "null", source: frame });
   return { env, controller };
 }

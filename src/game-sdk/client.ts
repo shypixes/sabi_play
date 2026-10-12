@@ -102,8 +102,17 @@ export interface GameModule {
 }
 export const defineGame = (game: GameModule): GameModule => game;
 
-/** Inbound message as delivered by the environment. */
-export type InboundMessage = { data: unknown; origin: string; source: unknown };
+/** The part of the browser MessagePort the SDK uses (replaced in tests). */
+export interface MessagePortLike {
+  postMessage(message: unknown): void;
+  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  removeEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  start(): void;
+  close(): void;
+}
+
+/** Inbound message as delivered by the environment. `ports` carries transferred channel ports. */
+export type InboundMessage = { data: unknown; origin: string; source: unknown; ports?: readonly MessagePortLike[] };
 
 /** Platform integration seam (browser by default; replaced in tests). */
 export interface SdkEnvironment {
@@ -144,7 +153,7 @@ export function browserEnvironment(): SdkEnvironment {
   const hostOrigin = window.location.origin;
   return {
     listen(handler) {
-      const fn = (e: MessageEvent) => handler({ data: e.data, origin: e.origin, source: e.source });
+      const fn = (e: MessageEvent) => handler({ data: e.data, origin: e.origin, source: e.source, ports: e.ports });
       window.addEventListener("message", fn);
       return () => window.removeEventListener("message", fn);
     },
@@ -164,6 +173,31 @@ function envelope<T extends GameMessage["type"]>(type: T, sessionId: string | nu
 }
 
 const ms = (iso: string | null): number | null => (iso === null ? null : Date.parse(iso));
+
+/**
+ * After the handshake the game talks to the platform ONLY over the private MessageChannel port
+ * transferred with "init". The port belongs to this document: if the frame navigates or reloads,
+ * the new document has no port, so it can never speak for this game (the host also treats any
+ * protocol message on the window after the handshake as a different document).
+ */
+function channelEnvironment(base: SdkEnvironment, port: MessagePortLike): SdkEnvironment {
+  return {
+    listen(handler) {
+      const fn = (e: { data: unknown }) => handler({ data: e.data, origin: "channel", source: port });
+      port.addEventListener("message", fn);
+      port.start();
+      // Stopping only unsubscribes: closing right after a final post (error / exit) could drop
+      // that message. The port lives and dies with this document.
+      return () => port.removeEventListener("message", fn);
+    },
+    isFromHost: (m) => m.source === port,
+    post: (message) => port.postMessage(message),
+    now: () => base.now(),
+    randomId: () => base.randomId(),
+    setTimer: (fn, delay) => base.setTimer(fn, delay),
+    clearTimer: (handle) => base.clearTimer(handle),
+  };
+}
 
 function toTiming(info: OfficialTimingInfo, env: SdkEnvironment): OfficialTiming {
   const endsAt = ms(info.endsAt);
@@ -206,12 +240,20 @@ export function connectToPlatform(options: ConnectOptions): Promise<GameSdk> {
     }
 
     let settled = false;
-    const fail = (code: SdkErrorCode, message: string, sessionId: string | null) => {
+    /** Fails the connection; a known session is told why (over the channel when there is one). */
+    const fail = (code: SdkErrorCode, message: string, sessionId: string | null, port?: MessagePortLike) => {
       if (settled) return;
       settled = true;
       stop();
       env.clearTimer(timer);
-      if (sessionId) env.post(envelope("error", sessionId, { code: code === "WRONG_GAME" ? "WRONG_GAME" : code, message: message.slice(0, 200), fatal: true }));
+      if (sessionId) {
+        const error = envelope("error", sessionId, { code, message: message.slice(0, 200), fatal: true });
+        if (port) {
+          port.postMessage(error);
+        } else {
+          env.post(error);
+        }
+      }
       reject(new SdkError(code, message));
     };
 
@@ -221,27 +263,32 @@ export function connectToPlatform(options: ConnectOptions): Promise<GameSdk> {
       if (!msg || msg.type !== "init") return;
       const ctx = msg.payload.context;
       if (msg.sessionId !== ctx.sessionId) return;
+      const port = m.ports?.[0];
+      if (!port) {
+        fail("INCOMPATIBLE", "The platform did not provide a private message channel.", ctx.sessionId);
+        return;
+      }
       if (!isRuntimeCompatible({ protocol: msg.protocol, sdkVersion: ctx.sdk.hostVersion }, { protocol: PROTOCOL_VERSION, sdkVersion: SDK_VERSION })
         || ctx.sdk.protocol !== PROTOCOL_VERSION) {
-        fail("INCOMPATIBLE", `Platform SDK ${ctx.sdk.hostVersion} (protocol ${ctx.sdk.protocol}) is not compatible with this game's SDK ${SDK_VERSION} (protocol ${PROTOCOL_VERSION}).`, ctx.sessionId);
+        fail("INCOMPATIBLE", `Platform SDK ${ctx.sdk.hostVersion} (protocol ${ctx.sdk.protocol}) is not compatible with this game's SDK ${SDK_VERSION} (protocol ${PROTOCOL_VERSION}).`, ctx.sessionId, port);
         return;
       }
       if (ctx.gameId !== manifest.id || ctx.gameVersion !== manifest.version) {
-        fail("WRONG_GAME", `This session is for ${ctx.gameId} ${ctx.gameVersion}, not ${manifest.id} ${manifest.version}.`, ctx.sessionId);
+        fail("WRONG_GAME", `This session is for ${ctx.gameId} ${ctx.gameVersion}, not ${manifest.id} ${manifest.version}.`, ctx.sessionId, port);
         return;
       }
       if (!manifest.formats.includes(ctx.format)) {
-        fail("INCOMPATIBLE", `The game does not support the ${ctx.format} format.`, ctx.sessionId);
+        fail("INCOMPATIBLE", `The game does not support the ${ctx.format} format.`, ctx.sessionId, port);
         return;
       }
       if (ctx.status !== "READY" || ctx.timing.startedAt !== null) {
-        fail("SESSION_NOT_PLAYABLE", `The session is ${ctx.status}; a game can only be launched for a READY session.`, ctx.sessionId);
+        fail("SESSION_NOT_PLAYABLE", `The session is ${ctx.status}; a game can only be launched for a READY session.`, ctx.sessionId, port);
         return;
       }
       settled = true;
       stop();
       env.clearTimer(timer);
-      resolve(createSession(env, manifest, ctx, options.submitTimeoutMs ?? 60_000));
+      resolve(createSession(channelEnvironment(env, port), manifest, ctx, options.submitTimeoutMs ?? 60_000));
     });
 
     const timer = env.setTimer(() => fail("HOST_TIMEOUT", "The platform did not provide a session in time.", null), options.timeoutMs ?? 10_000);

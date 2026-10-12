@@ -1,5 +1,119 @@
 SABI PLAY BUILD LOG
-Current Version: v1.3.0 (Game SDK v1; hosted Supabase and preview gameplay verification pending)
+Current Version: v1.3.1 (Game SDK v1 security patch; hosted Supabase and preview gameplay verification pending)
+=====================================
+v1.3.1 — PATCH: GAME FRAME SECURITY (F1 SANDBOX, F2 FRAME NAVIGATION, F3 FRAMING)
+=====================================
+Status: IMPLEMENTED; typecheck, unit, mocked-integration, mutation,
+production-build and local real-browser (Chromium only, MOCKED backend) checks
+pass. NOT verified on the Vercel preview, hosted Supabase, Firefox, Safari or
+a real phone.
+Version note: patch bump (security fixes, no new feature). Protocol version
+1 -> 2 and SDK_VERSION 1.0.0 -> 1.0.1: the wire transport changed, the public
+GameSdk API and the game manifests did not (games never bundle the SDK client;
+an older frame is refused at hello). No migration, schema, API route,
+competition state rule, wallet, middleware or dependency change. F4 (rate
+limiting) and paid-play requirements P1-P5 deliberately NOT addressed.
+
+Findings addressed (from the v1.3.0 security review):
+- F1: /game-frame/<id> opened directly (top level) ran with the app's origin
+  (auth cookie readable by script) and imported the game module in parallel
+  with the platform check.
+- F2: game code could navigate its own frame; the new document passed the
+  host's window/origin check (same iframe window, origin "null"), received
+  host messages, and could submit a forged result (baseline run: 999999
+  stored, COMPLETED).
+- F3: app pages sent no framing protection; another site could frame /login.
+
+Implemented:
+- next.config.ts: the frame response CSP now starts with `sandbox
+  allow-scripts` (the document is sandboxed even when not in our iframe).
+  Every other route gets X-Frame-Options: SAMEORIGIN and CSP
+  frame-ancestors 'self'. Inspected first: no route is embedded by another
+  site; /game-frame keeps its own frame-ancestors 'self'.
+- src/app/game-frame/[gameId]/boot.ts (new) + GameFrame.tsx: document load ->
+  connectToPlatform -> only then import and mount the game. No game code runs
+  outside the platform frame or before the private channel exists.
+- Transport (protocol 2): the host answers hello with init + a transferred
+  MessageChannel port; all later messages in both directions go over that
+  port (src/game-sdk/client.ts channelEnvironment; controller openChannel /
+  receiveFromChannel). The SDK refuses an init without a port and ignores host
+  window messages after init; its fatal handshake errors go over the port.
+- src/lib/game-host/controller.ts: the frame is revoked on a protocol message
+  on the frame window after the handshake, or on a second iframe load
+  (frameLoaded). Revoke closes the port, stops posting, unmounts the iframe
+  (GameHost: frameRevoked), and ends an unfinished attempt: READY ->
+  CANCELLED, IN_PROGRESS without a result -> ABANDONED; after a result was
+  received only the frame is dropped. Non-protocol window noise is ignored.
+  A frame that cannot receive the channel -> host_error, session released.
+- Docs: docs/architecture.md isolation layers rewritten to what is enforced
+  (7 layers) and limitations corrected; src/game-sdk/README.md (versions,
+  transport); version.ts versioning policy.
+
+Approach that FAILED and was replaced (found in the browser, not in unit
+tests): revoking on the second iframe load event alone. A navigated page can
+post before its load event: one run stored the forged 999999, another did not
+(race). A page that stalls its load event was never detected (forged result
+stored, it received host messages, iframe stayed). The document-bound
+MessageChannel replaced it; the load signal is kept as a second trigger.
+
+Tests actually run (all PASS unless stated):
+- npm run typecheck: PASS.
+- Unit + mocked integration: 329/329 (21 new): game-frame-boot (4),
+  game-host-frame-navigation (11), security-headers (3: reads the real
+  next.config headers() in production and development), game-sdk-client
+  (+2: init without a port is refused; after the handshake host-window
+  messages are ignored and the game posts only on the channel),
+  game-host-lifecycle (+1: hello on the channel is a violation). Updated:
+  post-handshake injections now use the channel; "second hello" now revokes;
+  fakes gained a microtask MessageChannel (Node's real one is macrotask-based).
+- Mutation check (each breakage applied, relevant tests run, file restored):
+  13/13 caught. Load-event patch: CSP sandbox removed, allow-same-origin
+  added, catch-all framing rule applied to the game frame, frameLoaded no-op,
+  channel kept after navigation, game imported before connect. Channel:
+  window messages processed after the channel exists, host posts via the
+  window, SDK session stays on the window, SDK accepts init without a port,
+  revoke leaves the port open, revoke on non-protocol noise, SDK handshake
+  error via the window.
+- next build (production, dummy env): PASS.
+- Local end-to-end, real Chromium (puppeteer-core + @sparticuz/chromium),
+  production build via next start, Supabase replaced by a local MOCKED
+  stand-in; a second origin (127.0.0.2:3200) plays the external page and
+  forges protocol-2 messages during parse, after load, and (stall variant)
+  while its load never completes. Same script as the unpatched baseline;
+  results identical in 3 runs:
+  - F1 top level: CSP has sandbox; self.origin "null"; document.cookie and
+    localStorage -> SecurityError; game module NOT loaded; shows "The game
+    must be launched by the Sabi Play platform." (baseline: app origin,
+    auth cookie readable, game module loaded).
+  - Normal flow: Pop Rush -> COMPLETED / UNVERIFIED, no console errors. Sum
+    Sprint real play: 6 correct answers, frame score 110 = "Result saved:
+    110" = stored 110, COMPLETED / UNVERIFIED, no console errors.
+  - F2 navigate while READY -> CANCELLED; while playing -> ABANDONED; while
+    playing with a page that stalls its load -> ABANDONED. In all: no stored
+    result, 0 extra submit RPCs, iframe removed, the external page received
+    0 host messages, host shows "The game left its frame (it navigated away
+    or reloaded), so this attempt was ended." (baseline: READY stayed READY
+    with host messages leaked; playing -> forged 999999 stored).
+  - F3: /, /login, /games, /games/pop-rush/play, /wallet, /api/health send
+    X-Frame-Options SAMEORIGIN + frame-ancestors 'self'; the frame sends
+    "sandbox allow-scripts; frame-ancestors 'self'" without XFO. Another
+    origin framing /login or the game frame -> blocked (chrome-error).
+- npm run test:db: NOT re-run (no SQL, migration or server change in this
+  patch; last run 87/87 at v1.3.0).
+- npm run lint: NOT run (next lint is interactive in this setup).
+- NOT verified: Firefox, Safari, real phone, Vercel preview, hosted Supabase.
+  Not tested: a navigated page that sends nothing and never loads (by design
+  it stays visible, display only, until Exit or its load event; see
+  docs/architecture.md).
+
+Known limitations (unchanged unless stated): see docs/architecture.md. New or
+corrected: a navigated page is not governed by the frame CSP (network
+allowed; could leak the non-secret session id / score the game had); init is
+posted with "*" to the frame window (no credentials; no game code runs before
+it); a silent stalled page stays visible until Exit; Chromium-only
+verification. Rate limiting (F4) and paid-play blockers P1-P5 remain open.
+Not production-ready, no paid play, no multiplayer.
+
 =====================================
 v1.3.0 — MINOR: GAME SDK v1 (ISOLATED GAME FRAME, REFERENCE GAME, SECOND INTEGRATION)
 =====================================

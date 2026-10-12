@@ -6,6 +6,7 @@ import {
   type GameSdk,
   type HostMessage,
   type InboundMessage,
+  type MessagePortLike,
   type ResultSubmission,
   type SdkEnvironment,
   type SessionView,
@@ -133,12 +134,73 @@ export class FakeBackend {
   }
 }
 
+/**
+ * One end of a fake MessageChannel with the browser's semantics that matter here: structured
+ * clone, async delivery, messages queued until start(), and close() disentangling both ends
+ * (later posts in either direction are dropped). Delivery is on microtasks (the real Node
+ * MessageChannel uses macrotasks, which the microtask-based `flush` would not drain).
+ */
+export class FakePort implements MessagePortLike {
+  other: FakePort | null = null;
+  closed = false;
+  /** Observes every message posted FROM this end (for test assertions). */
+  onSend: ((message: unknown) => void) | null = null;
+  private readonly listeners = new Set<(event: { data: unknown }) => void>();
+  private queue: unknown[] = [];
+  private started = false;
+  postMessage(message: unknown) {
+    const target = this.other;
+    if (this.closed || !target || target.closed) return;
+    const copy = structuredClone(message);
+    this.onSend?.(copy);
+    queueMicrotask(() => target.receive(copy));
+  }
+  addEventListener(_type: "message", listener: (event: { data: unknown }) => void) {
+    this.listeners.add(listener);
+  }
+  removeEventListener(_type: "message", listener: (event: { data: unknown }) => void) {
+    this.listeners.delete(listener);
+  }
+  start() {
+    if (this.started) return;
+    this.started = true;
+    const queued = this.queue;
+    this.queue = [];
+    for (const data of queued) this.receive(data);
+  }
+  close() {
+    this.closed = true;
+    this.listeners.clear();
+    if (this.other) this.other.closed = true;
+  }
+  private receive(data: unknown) {
+    if (this.closed) return;
+    if (!this.started) {
+      this.queue.push(data);
+      return;
+    }
+    for (const l of [...this.listeners]) l({ data });
+  }
+}
+
+export function fakeChannel(): [FakePort, FakePort] {
+  const a = new FakePort();
+  const b = new FakePort();
+  a.other = b;
+  b.other = a;
+  return [a, b];
+}
+
 /** Fake browser environment for the SDK side. Deliveries are async (like postMessage). */
 export class FakeGameEnv implements SdkEnvironment {
   readonly hostWindow = { name: "host" };
+  /** Everything the game sent: window posts (hello / pre-channel errors) and channel posts. */
   sent: GameMessage[] = [];
   private handlers = new Set<(m: InboundMessage) => void>();
   onPost: ((m: GameMessage) => void) | null = null;
+  /** Ends of the most recent channel opened with openChannel. */
+  hostPort: FakePort | null = null;
+  gamePort: FakePort | null = null;
   private ids = 0;
   constructor(private readonly clock: FakeClock) {}
   listen(handler: (m: InboundMessage) => void) {
@@ -156,11 +218,25 @@ export class FakeGameEnv implements SdkEnvironment {
   setTimer = (fn: () => void, ms: number) => this.clock.setTimer(fn, ms);
   clearTimer = (h: unknown) => this.clock.clearTimer(h);
   /** Deliver a message to the game as if posted by `source` from `origin`. */
-  deliver(data: unknown, source: unknown = this.hostWindow, origin = HOST_ORIGIN) {
+  deliver(data: unknown, source: unknown = this.hostWindow, origin = HOST_ORIGIN, ports?: readonly MessagePortLike[]) {
     const copy = structuredClone(data);
     queueMicrotask(() => {
-      for (const h of [...this.handlers]) h({ data: copy, origin, source });
+      for (const h of [...this.handlers]) h({ data: copy, origin, source, ...(ports ? { ports } : {}) });
     });
+  }
+  /** What the host does for init: deliver it from the host window with a fresh channel port; returns the host end. */
+  openChannel(init: unknown): FakePort {
+    const [hostPort, gamePort] = fakeChannel();
+    gamePort.onSend = (m) => this.sent.push(m as GameMessage);
+    this.hostPort = hostPort;
+    this.gamePort = gamePort;
+    this.deliver(init, this.hostWindow, HOST_ORIGIN, [gamePort]);
+    return hostPort;
+  }
+  /** A post-init host message: travels over the channel. */
+  fromHost(data: unknown) {
+    if (!this.hostPort) throw new Error("no channel: deliver init with openChannel first");
+    this.hostPort.postMessage(data);
   }
   listenerCount() {
     return this.handlers.size;
@@ -203,12 +279,23 @@ export function linkedHarness(opts: { manifest?: unknown; backend?: FakeBackend;
       hostReceived.push(structuredClone(m));
       env.deliver(m);
     },
+    openChannel: (init) => {
+      hostReceived.push(structuredClone(init));
+      const port = env.openChannel(init);
+      port.onSend = (m) => hostReceived.push(m as HostMessage);
+      return port;
+    },
     isFromGame: (m) => m.source === frameWindow && m.origin === "null",
   });
   env.onPost = (m) => controller.receive({ data: m, origin: "null", source: frameWindow });
-  /** Inject a raw message into the host as if sent by the game frame (or by another window). */
+  /** Inject a raw message on the frame WINDOW, as if posted by whatever document the frame holds (or by another window). */
   const fromGame = (data: unknown, source: unknown = frameWindow, origin = "null") => controller.receive({ data, origin, source });
+  /** Inject a raw message on the game document's private channel (as the game code could). */
+  const fromGamePort = (data: unknown) => {
+    if (!env.gamePort) throw new Error("no channel yet");
+    env.gamePort.postMessage(data);
+  };
   const connect = (manifest: unknown = opts.manifest ?? POP_RUSH_TEST_MANIFEST): Promise<GameSdk> =>
     connectToPlatform({ manifest, env, timeoutMs: 5000, submitTimeoutMs: 60_000 });
-  return { clock, backend, env, controller, frameWindow, hostReceived, fromGame, connect };
+  return { clock, backend, env, controller, frameWindow, hostReceived, fromGame, fromGamePort, connect };
 }

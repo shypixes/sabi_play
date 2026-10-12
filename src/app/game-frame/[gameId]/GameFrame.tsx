@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { SdkError, connectToPlatform, type GameManifest, type GameSdk } from "@/game-sdk";
+import { SdkError, connectToPlatform, type GameManifest } from "@/game-sdk";
 import { GAME_LOADERS } from "@/games/loaders";
+import { bootGame, windowLoaded, type BootedGame } from "./boot";
 import styles from "./game-frame.module.css";
 
 /** One boot per document: a game session is a single attempt (also under React StrictMode). */
 let booted = false;
 
 /**
- * Platform-owned bootstrap inside the sandboxed frame: connects the SDK (session context and
- * compatibility checks), loads the game module and mounts it. Disposes everything on pagehide.
+ * Platform-owned bootstrap inside the sandboxed frame (see boot.ts for the order): waits for the
+ * document to load, connects the SDK (embedding, manifest and compatibility checks), and only
+ * then imports and mounts the game module. Disposes everything on pagehide.
  */
 export function GameFrame({ manifest }: { manifest: GameManifest }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -20,30 +22,24 @@ export function GameFrame({ manifest }: { manifest: GameManifest }) {
     const root = rootRef.current;
     if (!root || booted) return;
     booted = true;
-    let sdk: GameSdk | null = null;
-    let handle: { dispose(): void } | null = null;
     const loader = GAME_LOADERS[manifest.id];
-
-    const teardown = () => {
-      try { handle?.dispose(); } finally { sdk?.dispose(); }
-      handle = null;
-      sdk = null;
-    };
-    window.addEventListener("pagehide", teardown);
-
     if (!loader) {
       setError("This game is not installed on the platform.");
       return;
     }
-    Promise.all([connectToPlatform({ manifest }), loader()])
-      .then(([connected, mod]) => {
-        sdk = connected;
-        try {
-          handle = mod.default.mount(root, connected);
-        } catch (err) {
-          connected.reportError("MOUNT_FAILED", err instanceof Error ? err.message : "The game failed to start.", { fatal: true });
-          setError("The game failed to start.");
-        }
+    let game: BootedGame | null = null;
+    let leaving = false;
+    const teardown = () => {
+      leaving = true;
+      game?.dispose();
+      game = null;
+    };
+    window.addEventListener("pagehide", teardown);
+
+    bootGame(root, { documentLoaded: windowLoaded, connect: () => connectToPlatform({ manifest }), load: loader })
+      .then((started) => {
+        if (leaving) started.dispose();
+        else game = started;
       })
       .catch((err: unknown) => {
         setError(err instanceof SdkError ? err.message : "The game could not be loaded.");

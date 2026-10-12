@@ -93,12 +93,13 @@ describe("lifecycle: init -> context -> ready -> authorised start -> submit -> c
     await launch(h);
     const sid = h.controller.getState().session!.sessionId;
     for (const type of ["start", "cancel", "settle", "submit-result"]) {
-      h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type, sessionId: sid, payload: {} });
+      h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type, sessionId: sid, payload: {} });
     }
     // submit before start (valid shape, wrong phase)
-    h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sid,
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sid,
       payload: { submissionId: "00000000-0000-4000-8000-000000000099", score: 5, gameVersion: "1.0.0" } });
-    h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "exit", sessionId: sid, payload: {} });
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "exit", sessionId: sid, payload: {} });
+    await flush();
     expect(h.controller.getState().violations).toBe(6);
     expect(sessionOf(h)).toMatchObject({ status: "READY", result: null });
     expect(h.backend.count("startSession") + h.backend.count("submitResult") + h.backend.count("cancelSession")).toBe(0);
@@ -118,7 +119,8 @@ describe("lifecycle: init -> context -> ready -> authorised start -> submit -> c
   it("rejects messages for another session", async () => {
     const h = linkedHarness();
     await launch(h);
-    h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "ready", sessionId: "11111111-1111-4111-8111-111111111111", payload: {} });
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "ready", sessionId: "11111111-1111-4111-8111-111111111111", payload: {} });
+    await flush();
     expect(h.controller.getState()).toMatchObject({ phase: "awaiting_ready", violations: 1 });
     expect(lastHostMessage(h)).toMatchObject({ type: "error", payload: { code: "WRONG_SESSION" } });
   });
@@ -126,25 +128,33 @@ describe("lifecycle: init -> context -> ready -> authorised start -> submit -> c
   it("stops the game after too many invalid messages and releases the unstarted session", async () => {
     const h = linkedHarness();
     await launch(h);
-    for (let i = 0; i < MAX_PROTOCOL_VIOLATIONS; i++) h.fromGame({ garbage: i });
+    for (let i = 0; i < MAX_PROTOCOL_VIOLATIONS; i++) h.fromGamePort({ garbage: i });
     await flush();
     expect(h.controller.getState().phase).toBe("failed");
     expect(h.hostReceived.find((m) => m.type === "terminate")).toMatchObject({ payload: { reason: "protocol_error" } });
     expect(sessionOf(h).status).toBe("CANCELLED");
   });
 
-  it("a restarted game (second hello) is terminated, never re-initialised", async () => {
+  it("a restarted game (second hello on the window) revokes the frame and is never re-initialised", async () => {
     const h = linkedHarness();
-    const sdk = await launch(h);
-    const terminations: string[] = [];
-    sdk.on("terminate", (t) => terminations.push(t.reason));
+    await launch(h);
+    const sent = h.hostReceived.length;
     h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "hello", sessionId: null,
       payload: { sdkVersion: "1.0.0", gameId: "pop-rush", gameVersion: "1.0.0" } });
     await flush();
-    expect(terminations).toEqual(["restarted"]);
-    expect(h.controller.getState().phase).toBe("failed");
-    expect(h.hostReceived.filter((m) => m.type === "init")).toHaveLength(1);
+    expect(h.controller.getState()).toMatchObject({ phase: "failed", frameRevoked: true });
+    expect(h.hostReceived.length).toBe(sent); // nothing (no second init) goes to the new document
     expect(sessionOf(h).status).toBe("CANCELLED");
+  });
+
+  it("hello on the private channel is a violation (it is only sent once, before the context)", async () => {
+    const h = linkedHarness();
+    await launch(h);
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "hello", sessionId: null,
+      payload: { sdkVersion: "1.0.0", gameId: "pop-rush", gameVersion: "1.0.0" } });
+    await flush();
+    expect(h.controller.getState()).toMatchObject({ phase: "awaiting_ready", violations: 1, frameRevoked: false });
+    expect(h.hostReceived.filter((m) => m.type === "init")).toHaveLength(1);
   });
 
   it("refuses the wrong game or an incompatible SDK at hello", async () => {
@@ -377,7 +387,7 @@ describe("result submission", () => {
     await settle(h, first);
     // A modified game bypassing the SDK sends another submission directly:
     const sid = sessionOf(h).sessionId;
-    h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sid,
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sid,
       payload: { submissionId: "00000000-0000-4000-8000-0000000000aa", score: 999999, gameVersion: "1.0.0" } });
     await flush();
     expect(lastHostMessage(h)).toMatchObject({ type: "submit-result", payload: { outcome: { status: "rejected", reason: "ALREADY_SUBMITTED" } } });
@@ -394,8 +404,9 @@ describe("result submission", () => {
 
   it("rejects a result tagged with another game version", async () => {
     const { h } = await playing();
-    h.fromGame({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sessionOf(h).sessionId,
+    h.fromGamePort({ channel: MESSAGE_CHANNEL, protocol: PROTOCOL_VERSION, type: "submit", sessionId: sessionOf(h).sessionId,
       payload: { submissionId: "00000000-0000-4000-8000-0000000000bb", score: 1, gameVersion: "9.9.9" } });
+    await flush();
     expect(h.controller.getState().violations).toBe(1);
     expect(h.backend.count("submitResult")).toBe(0);
   });
